@@ -1,10 +1,11 @@
 import { Routes, Route, NavLink, useLocation } from "react-router-dom";
 import { useState } from "react";
 import {
-  User, List, Image, AlignLeft, Server, Settings, ChevronRight
+  User, List, Image, AlignLeft, Server, Settings, ChevronRight, SlidersHorizontal
 } from "lucide-react";
 import CharacterSetup from "./pages/CharacterSetup";
 import ShotList from "./pages/ShotList";
+import GeneratorSettings from "./pages/GeneratorSettings";
 import BatchGenerator from "./pages/BatchGenerator";
 import CaptionEditor from "./pages/CaptionEditor";
 import RunPodLauncher from "./pages/RunPodLauncher";
@@ -14,6 +15,7 @@ import { useStore } from "./store";
 const NAV_ITEMS = [
   { to: "/", icon: User, label: "Character", sub: "identity & trigger" },
   { to: "/shots", icon: List, label: "Shot List", sub: "poses & outfits" },
+  { to: "/generator", icon: SlidersHorizontal, label: "Sampler", sub: "steps, cfg, scheduler" },
   { to: "/generate", icon: Image, label: "Generate", sub: "forge batch" },
   { to: "/captions", icon: AlignLeft, label: "Captions", sub: "review & edit" },
   { to: "/runpod", icon: Server, label: "RunPod", sub: "train on cloud" },
@@ -158,6 +160,7 @@ export default function App() {
         <Routes>
           <Route path="/" element={<CharacterSetup />} />
           <Route path="/shots" element={<ShotList />} />
+          <Route path="/generator" element={<GeneratorSettings />} />
           <Route path="/generate" element={<BatchGenerator />} />
           <Route path="/captions" element={<CaptionEditor />} />
           <Route path="/runpod" element={<RunPodLauncher />} />

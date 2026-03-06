@@ -1,6 +1,6 @@
 import { useState, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { Play, Square, RotateCcw, Check, X, Zap, ZoomIn } from "lucide-react";
+import { Play, Square, RotateCcw, Check, X, Zap, ZoomIn, ChevronDown, ChevronUp, Trash2 } from "lucide-react";
 import PageHeader from "../components/PageHeader";
 import { useStore, GeneratedImage } from "../store";
 import { base64ToBytes, deriveCaption } from "../lib/forge";
@@ -21,15 +21,18 @@ function humanizeError(err: unknown): string {
 }
 
 function buildFullPrompt(
-  character: { triggerWord: string; baseDescription: string; artistTags: string },
-  combo: { pose: string; outfit: string; expression: string; background: string; extras: string; loras: string[] }
+  character: { triggerWord: string; species: string; baseDescription: string; artistTags: string },
+  combo: { pose: string; outfit: string; expression: string; background: string; extras: string; loras: string[] },
+  positiveEmbeddings: string[]
 ) {
   return [
     character.triggerWord,
+    character.species,
     character.baseDescription,
     character.artistTags ? `style of ${character.artistTags}` : "",
     combo.pose, combo.outfit, combo.expression, combo.background, combo.extras,
     ...combo.loras,
+    ...positiveEmbeddings,
     "masterpiece, best quality, highres",
   ].filter((s) => s && s.trim()).join(", ");
 }
@@ -72,6 +75,13 @@ function ImageCard({ img, onApprove, onReject, onDelete, onLightbox }: {
 }) {
   const [b64, setB64] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+
+  const handleDelete = async () => {
+    setDeleting(true);
+    try { await invoke("delete_image", { path: img.path }); } catch {}
+    onDelete();
+  };
 
   const loadImage = async () => {
     if (b64 || loading) return;
@@ -113,6 +123,9 @@ function ImageCard({ img, onApprove, onReject, onDelete, onLightbox }: {
       <div style={{ padding: "8px", display: "flex", gap: "6px" }}>
         <button onClick={onApprove} style={{ flex: 1, padding: "5px", fontSize: "11px", background: img.approved === true ? "var(--green)" : "var(--green-dim)", border: `1px solid var(--green)`, color: img.approved === true ? "white" : "var(--green)", borderRadius: "4px", cursor: "pointer", fontFamily: "var(--font-display)", fontWeight: 600, letterSpacing: "0.05em", textTransform: "uppercase" }}>✓</button>
         <button onClick={onReject} style={{ flex: 1, padding: "5px", fontSize: "11px", background: img.approved === false ? "var(--red)" : "var(--red-dim)", border: `1px solid var(--red)`, color: img.approved === false ? "white" : "#d47070", borderRadius: "4px", cursor: "pointer", fontFamily: "var(--font-display)", fontWeight: 600, letterSpacing: "0.05em", textTransform: "uppercase" }}>✗</button>
+        <button onClick={handleDelete} disabled={deleting} style={{ padding: "5px 7px", fontSize: "11px", background: "var(--bg-3)", border: "1px solid var(--border)", color: "var(--text-muted)", borderRadius: "4px", cursor: "pointer" }} title="Delete from disk">
+          <Trash2 size={11} />
+        </button>
       </div>
 
       {/* Caption snippet */}
@@ -125,7 +138,7 @@ function ImageCard({ img, onApprove, onReject, onDelete, onLightbox }: {
 
 // ── Main Component ────────────────────────────────────────────────────────────
 export default function BatchGenerator() {
-  const { character, generation, images, addImage, updateImage, removeImage, settings } = useStore();
+  const { character, generation, images, addImage, updateImage, removeImage, clearImages, settings } = useStore();
   const [status, setStatus] = useState<Status>("idle");
   const [currentJob, setCurrentJob] = useState("");
   const [queuePos, setQueuePos] = useState({ current: 0, total: 0 });
@@ -134,21 +147,25 @@ export default function BatchGenerator() {
   const [thumbSize, setThumbSize] = useState(220);
   const [genMode, setGenMode] = useState<"all" | "random">("all");
   const [randomN, setRandomN] = useState(10);
+  const [confirmPurge, setConfirmPurge] = useState(false);
+  const [confirmGenerate, setConfirmGenerate] = useState(false);
+  const [approvedExpanded, setApprovedExpanded] = useState(false);
   const abortRef = useRef(false);
 
   const pending = images.filter((i) => i.approved === null);
   const approved = images.filter((i) => i.approved === true);
   const rejected = images.filter((i) => i.approved === false);
 
-  const runGeneration = async (queue: Array<{ prompt: string; shotId: string; width: number; height: number }>) => {
+  const runGeneration = async (queue: Array<{ prompt: string; shotId: string; width: number; height: number; sourceImageId?: string; sourceImagePath?: string }>) => {
     abortRef.current = false;
     setStatus("running");
     setLastError("");
     setQueuePos({ current: 0, total: queue.length });
+    await new Promise((r) => setTimeout(r, 0)); // flush React paint before loop
 
     for (let i = 0; i < queue.length; i++) {
       if (abortRef.current) break;
-      const { prompt, shotId, width, height } = queue[i];
+      const { prompt, shotId, width, height, sourceImageId, sourceImagePath } = queue[i];
       setQueuePos({ current: i + 1, total: queue.length });
       setCurrentJob(prompt.split(",").slice(0, 4).join(", "));
       const seed = Math.floor(Math.random() * 2147483647);
@@ -158,12 +175,13 @@ export default function BatchGenerator() {
           baseUrl: settings.forgeUrl,
           params: {
             prompt,
-            negative_prompt: "lowres, bad anatomy, bad hands, missing fingers, cropped, worst quality, low quality, jpeg artifacts, signature, watermark, blurry",
-            steps: 28,
-            cfg_scale: 7.0,
+            negative_prompt: ["lowres, bad anatomy, bad hands, missing fingers, cropped, worst quality, low quality, jpeg artifacts, signature, watermark, blurry", ...generation.negativeEmbeddings].join(", "),
+            steps: generation.steps,
+            cfg_scale: generation.cfgScale,
             width,
             height,
-            sampler_name: "DPM++ 2M Karras",
+            sampler_name: generation.samplerName,
+            scheduler: generation.scheduler || undefined,
             seed,
             batch_size: 1,
             ...(character.baseModel ? { override_settings: { sd_model_checkpoint: character.baseModel } } : {}),
@@ -177,6 +195,11 @@ export default function BatchGenerator() {
         const caption = deriveCaption(prompt, character.triggerWord);
         await invoke("save_caption", { imagePath, caption });
         addImage({ id: imageId, shotId, path: imagePath, prompt, caption, approved: null, seed, width, height });
+        // If this was a requeue, delete the old file and remove it from store now that replacement succeeded
+        if (sourceImageId && sourceImagePath) {
+          try { await invoke("delete_image", { path: sourceImagePath }); } catch {}
+          removeImage(sourceImageId);
+        }
       } catch (err) {
         setLastError(humanizeError(err));
         console.error("Generation error:", err);
@@ -207,7 +230,7 @@ export default function BatchGenerator() {
 
     const queue = combos.flatMap(([pose, outfit, expression, background]) =>
       Array.from({ length: generation.count }, () => ({
-        prompt: buildFullPrompt(character, { pose, outfit, expression, background, extras: generation.extras, loras: generation.loras }),
+        prompt: buildFullPrompt(character, { pose, outfit, expression, background, extras: generation.extras, loras: generation.loras }, generation.positiveEmbeddings),
         shotId: `${pose}|${outfit}|${expression}|${background}`,
         width: generation.width,
         height: generation.height,
@@ -221,9 +244,40 @@ export default function BatchGenerator() {
   const requeueRejected = async () => {
     const toRequeue = images.filter((i) => i.approved === false);
     if (!toRequeue.length) return;
-    const queue = toRequeue.map((img) => ({ prompt: img.prompt, shotId: img.shotId, width: img.width ?? 1024, height: img.height ?? 1024 }));
-    toRequeue.forEach((img) => removeImage(img.id));
+    const queue = toRequeue.map((img) => ({
+      prompt: img.prompt,
+      shotId: img.shotId,
+      width: img.width ?? 1024,
+      height: img.height ?? 1024,
+      sourceImageId: img.id,
+      sourceImagePath: img.path,
+    }));
     await runGeneration(queue);
+  };
+
+  const purgeAll = async () => {
+    for (const img of images) {
+      try { await invoke("delete_image", { path: img.path }); } catch {}
+    }
+    clearImages();
+    setConfirmPurge(false);
+  };
+
+  const handleGenerateClick = () => {
+    if (images.length > 0) {
+      setConfirmGenerate(true);
+    } else {
+      generateAll();
+    }
+  };
+
+  const purgeAndGenerate = async () => {
+    setConfirmGenerate(false);
+    for (const img of images) {
+      try { await invoke("delete_image", { path: img.path }); } catch {}
+    }
+    clearImages();
+    generateAll();
   };
 
   return (
@@ -266,8 +320,14 @@ export default function BatchGenerator() {
                 />
               )}
             </div>
+            {images.length > 0 && status === "idle" && (
+              <button className="btn-danger" onClick={() => setConfirmPurge(true)} style={{ opacity: 0.8 }}>
+                <Trash2 size={12} style={{ display: "inline", marginRight: "5px" }} />
+                Purge
+              </button>
+            )}
             {rejected.length > 0 && status === "idle" && (
-              <button className="btn-ghost" onClick={requeueRejected}>
+              <button className="btn-primary" onClick={requeueRejected}>
                 <RotateCcw size={12} style={{ display: "inline", marginRight: "5px" }} />
                 Requeue {rejected.length}
               </button>
@@ -277,7 +337,7 @@ export default function BatchGenerator() {
                 <Square size={12} style={{ display: "inline", marginRight: "5px" }} />Stop
               </button>
             ) : (
-              <button className="btn-primary" onClick={generateAll}>
+              <button className="btn-primary" onClick={handleGenerateClick}>
                 <Play size={12} style={{ display: "inline", marginRight: "5px" }} />Generate All Shots
               </button>
             )}
@@ -304,6 +364,52 @@ export default function BatchGenerator() {
         </div>
       )}
 
+      {confirmGenerate && (
+        <div style={{ padding: "12px 28px", background: "var(--accent-glow)", borderBottom: "1px solid var(--accent-dim)", flexShrink: 0, display: "flex", alignItems: "center", gap: "10px", flexWrap: "wrap" }}>
+          <span style={{ fontFamily: "var(--font-mono)", fontSize: "11px", color: "var(--accent-bright)", flex: 1, minWidth: "200px" }}>
+            {images.length} image{images.length !== 1 ? "s" : ""} already exist. What would you like to do?
+          </span>
+          <button onClick={() => { setConfirmGenerate(false); generateAll(); }} style={{
+            padding: "5px 14px", fontSize: "11px", cursor: "pointer",
+            background: "var(--accent-glow)", border: "1px solid var(--accent-dim)",
+            color: "var(--accent-bright)", borderRadius: "4px",
+            fontFamily: "var(--font-display)", fontWeight: 600, letterSpacing: "0.04em", whiteSpace: "nowrap",
+          }}>Continue (add more)</button>
+          <button onClick={purgeAndGenerate} style={{
+            padding: "5px 14px", fontSize: "11px", cursor: "pointer",
+            background: "var(--red)", border: "none", color: "white",
+            borderRadius: "4px", fontFamily: "var(--font-display)", fontWeight: 700,
+            letterSpacing: "0.04em", whiteSpace: "nowrap",
+          }}>Purge &amp; redo</button>
+          <button onClick={() => setConfirmGenerate(false)} style={{
+            padding: "5px 14px", fontSize: "11px", cursor: "pointer",
+            background: "transparent", border: "1px solid var(--border)",
+            color: "var(--text-muted)", borderRadius: "4px",
+            fontFamily: "var(--font-display)", fontWeight: 600, letterSpacing: "0.04em",
+          }}>Cancel</button>
+        </div>
+      )}
+
+      {confirmPurge && (
+        <div style={{ padding: "10px 28px", background: "rgba(154,74,74,0.12)", borderBottom: "1px solid var(--red)", flexShrink: 0, display: "flex", alignItems: "center", gap: "16px" }}>
+          <span style={{ fontFamily: "var(--font-mono)", fontSize: "11px", color: "#d47070", flex: 1 }}>
+            This will permanently delete all {images.length} image{images.length !== 1 ? "s" : ""} and caption files from disk. This cannot be undone.
+          </span>
+          <button onClick={purgeAll} style={{
+            padding: "5px 14px", fontSize: "11px", cursor: "pointer",
+            background: "var(--red)", border: "none", color: "white",
+            borderRadius: "4px", fontFamily: "var(--font-display)", fontWeight: 700,
+            letterSpacing: "0.05em", textTransform: "uppercase",
+          }}>Delete all</button>
+          <button onClick={() => setConfirmPurge(false)} style={{
+            padding: "5px 14px", fontSize: "11px", cursor: "pointer",
+            background: "transparent", border: "1px solid var(--border)",
+            color: "var(--text-muted)", borderRadius: "4px",
+            fontFamily: "var(--font-display)", fontWeight: 600, letterSpacing: "0.05em",
+          }}>Cancel</button>
+        </div>
+      )}
+
       <div style={{ display: "flex", gap: "1px", borderBottom: "1px solid var(--border)", flexShrink: 0 }}>
         {[
           { label: "Pending", value: pending.length, color: "var(--text-secondary)" },
@@ -319,23 +425,67 @@ export default function BatchGenerator() {
       </div>
 
       <div style={{ flex: 1, overflow: "auto", padding: "20px 28px" }}>
-        {images.length === 0 ? (
+        {/* Pending + rejected grid */}
+        {[...pending, ...rejected].length === 0 && approved.length === 0 ? (
           <div style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", height: "300px", gap: "12px" }}>
             <Zap size={32} color="var(--text-muted)" strokeWidth={1} />
             <div style={{ fontFamily: "var(--font-display)", fontSize: "16px", color: "var(--text-muted)" }}>No images generated yet</div>
             <div style={{ fontFamily: "var(--font-body)", fontStyle: "italic", fontSize: "13px", color: "var(--text-muted)" }}>Add variants on the Shot List page, then hit Generate</div>
           </div>
         ) : (
-          <div style={{ display: "grid", gridTemplateColumns: `repeat(auto-fill, minmax(${thumbSize}px, 1fr))`, gap: "12px" }}>
-            {images.map((img) => (
-              <ImageCard key={img.id} img={img}
-                onApprove={() => updateImage(img.id, { approved: true })}
-                onReject={() => updateImage(img.id, { approved: false })}
-                onDelete={() => removeImage(img.id)}
-                onLightbox={setLightboxB64}
-              />
-            ))}
-          </div>
+          <>
+            {[...pending, ...rejected].length > 0 && (
+              <div style={{ display: "grid", gridTemplateColumns: `repeat(auto-fill, minmax(${thumbSize}px, 1fr))`, gap: "12px" }}>
+                {[...pending, ...rejected].map((img) => (
+                  <ImageCard key={img.id} img={img}
+                    onApprove={() => updateImage(img.id, { approved: true })}
+                    onReject={() => updateImage(img.id, { approved: false })}
+                    onDelete={() => removeImage(img.id)}
+                    onLightbox={setLightboxB64}
+                  />
+                ))}
+              </div>
+            )}
+
+            {/* Approved collapsible section */}
+            {approved.length > 0 && (
+              <div style={{ borderRadius: "8px", border: "1px solid var(--border)", overflow: "hidden", marginTop: [...pending, ...rejected].length > 0 ? "20px" : "0" }}>
+                <div
+                  onClick={() => setApprovedExpanded(!approvedExpanded)}
+                  style={{
+                    display: "flex", alignItems: "center", gap: "10px",
+                    padding: "10px 16px", cursor: "pointer",
+                    background: "var(--bg-2)", userSelect: "none",
+                  }}
+                >
+                  <Check size={13} color="var(--green)" strokeWidth={2.5} />
+                  <span style={{ fontFamily: "var(--font-mono)", fontSize: "11px", color: "var(--green)", fontWeight: 700 }}>
+                    {approved.length} Approved
+                  </span>
+                  <span style={{ fontFamily: "var(--font-mono)", fontSize: "10px", color: "var(--text-muted)", flex: 1 }}>
+                    — ready for captioning
+                  </span>
+                  {approvedExpanded
+                    ? <ChevronUp size={13} color="var(--text-muted)" />
+                    : <ChevronDown size={13} color="var(--text-muted)" />}
+                </div>
+                {approvedExpanded && (
+                  <div style={{ padding: "12px 16px", background: "var(--bg-1)" }}>
+                    <div style={{ display: "grid", gridTemplateColumns: `repeat(auto-fill, minmax(${Math.max(120, thumbSize - 60)}px, 1fr))`, gap: "8px" }}>
+                      {approved.map((img) => (
+                        <ImageCard key={img.id} img={img}
+                          onApprove={() => updateImage(img.id, { approved: true })}
+                          onReject={() => updateImage(img.id, { approved: false })}
+                          onDelete={() => removeImage(img.id)}
+                          onLightbox={setLightboxB64}
+                        />
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+          </>
         )}
       </div>
       <style>{`@keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }`}</style>

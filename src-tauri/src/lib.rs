@@ -18,6 +18,7 @@ pub struct Txt2ImgRequest {
     pub width: Option<u32>,
     pub height: Option<u32>,
     pub sampler_name: Option<String>,
+    pub scheduler: Option<String>,
     pub seed: Option<i64>,
     pub batch_size: Option<u32>,
     pub override_settings: Option<serde_json::Value>,

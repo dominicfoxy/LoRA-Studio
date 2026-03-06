@@ -8,9 +8,15 @@ export interface GenerationConfig {
   backgrounds: string[];
   extras: string;
   loras: string[];
+  positiveEmbeddings: string[];
+  negativeEmbeddings: string[];
   count: number;
   width: number;
   height: number;
+  steps: number;
+  cfgScale: number;
+  samplerName: string;
+  scheduler: string;
 }
 
 export interface GeneratedImage {
@@ -84,9 +90,15 @@ const defaultGeneration: GenerationConfig = {
   backgrounds: [],
   extras: "",
   loras: [],
+  positiveEmbeddings: [],
+  negativeEmbeddings: [],
   count: 1,
   width: 1024,
   height: 1024,
+  steps: 28,
+  cfgScale: 7,
+  samplerName: "DPM++ 2M Karras",
+  scheduler: "Karras",
 };
 
 export const useStore = create<ProjectState>()(
@@ -117,7 +129,7 @@ export const useStore = create<ProjectState>()(
     }),
     {
       name: "lora-studio-state",
-      version: 2,
+      version: 4,
       migrate: (persistedState: unknown, version: number) => {
         const state = persistedState as any;
         // v0: flat string fields on shot items
@@ -146,11 +158,33 @@ export const useStore = create<ProjectState>()(
             backgrounds: sh?.backgrounds ?? [],
             extras: sh?.extras ?? "",
             loras: sh?.loras ?? [],
+            positiveEmbeddings: [],
+            negativeEmbeddings: [],
             count: sh?.count ?? 1,
             width: sh?.width ?? 1024,
             height: sh?.height ?? 1024,
           };
           delete state.shots;
+        }
+        // v2: generation exists but is missing embedding fields
+        if (version === 2) {
+          state.generation = {
+            ...defaultGeneration,
+            ...state.generation,
+            positiveEmbeddings: state.generation?.positiveEmbeddings ?? [],
+            negativeEmbeddings: state.generation?.negativeEmbeddings ?? [],
+          };
+        }
+        // v3: missing sampler/scheduler/steps/cfg fields
+        if (version === 3) {
+          state.generation = {
+            ...defaultGeneration,
+            ...state.generation,
+            steps: state.generation?.steps ?? 28,
+            cfgScale: state.generation?.cfgScale ?? 7,
+            samplerName: state.generation?.samplerName ?? "DPM++ 2M Karras",
+            scheduler: state.generation?.scheduler ?? "Karras",
+          };
         }
         return state;
       },

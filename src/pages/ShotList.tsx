@@ -165,6 +165,52 @@ function CategoryPanel({
   );
 }
 
+// ── Chip Input (compact, for embeddings) ─────────────────────────────────────
+function ChipInput({ values, onChange, placeholder }: {
+  values: string[];
+  onChange: (v: string[]) => void;
+  placeholder: string;
+}) {
+  const [input, setInput] = useState("");
+  const add = (tag: string) => {
+    const t = tag.trim();
+    if (!t || values.includes(t)) return;
+    onChange([...values, t]);
+  };
+  const commit = () => { if (input.trim()) { add(input); setInput(""); } };
+  return (
+    <div>
+      {values.length > 0 && (
+        <div style={{ display: "flex", flexWrap: "wrap", gap: "4px", marginBottom: "6px" }}>
+          {values.map((v) => (
+            <div key={v} style={{
+              display: "inline-flex", alignItems: "center", gap: "3px",
+              padding: "2px 6px 2px 9px",
+              background: "var(--bg-3)", border: "1px solid var(--border)",
+              borderRadius: "3px", fontFamily: "var(--font-mono)", fontSize: "10px", color: "var(--text-secondary)",
+            }}>
+              {v}
+              <button onClick={() => onChange(values.filter((x) => x !== v))} style={{
+                background: "none", border: "none", cursor: "pointer",
+                color: "var(--text-muted)", padding: "0 0 0 2px", fontSize: "13px", lineHeight: 1,
+                display: "flex", alignItems: "center",
+              }}>×</button>
+            </div>
+          ))}
+        </div>
+      )}
+      <input
+        style={{ width: "100%" }}
+        placeholder={placeholder}
+        value={input}
+        onChange={(e) => setInput(e.target.value)}
+        onKeyDown={(e) => { if (e.key === "Enter" || e.key === ",") { e.preventDefault(); commit(); } }}
+        onBlur={commit}
+      />
+    </div>
+  );
+}
+
 // ── LoRA Browser ──────────────────────────────────────────────────────────────
 interface LoraFile { name: string; path: string; }
 
@@ -294,6 +340,30 @@ function SettingsPanel() {
               <div style={{ marginTop: "12px" }}>
                 <div className="section-label">Extra Tags <span style={{ color: "var(--text-muted)", fontWeight: 400 }}>(added to every prompt)</span></div>
                 <input style={{ width: "100%", marginTop: "4px" }} placeholder="rain, umbrella, night" value={generation.extras} onChange={(e) => updateGeneration({ extras: e.target.value })} />
+              </div>
+            </div>
+          </div>
+
+          {/* Embeddings */}
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "16px", marginTop: "16px" }}>
+            <div>
+              <div className="section-label">Positive Embeddings <span style={{ color: "var(--text-muted)", fontWeight: 400 }}>(added to prompt)</span></div>
+              <div style={{ marginTop: "4px" }}>
+                <ChipInput
+                  values={generation.positiveEmbeddings}
+                  onChange={(v) => updateGeneration({ positiveEmbeddings: v })}
+                  placeholder="e.g. style-name, quality-token"
+                />
+              </div>
+            </div>
+            <div>
+              <div className="section-label">Negative Embeddings <span style={{ color: "var(--text-muted)", fontWeight: 400 }}>(added to negative prompt)</span></div>
+              <div style={{ marginTop: "4px" }}>
+                <ChipInput
+                  values={generation.negativeEmbeddings}
+                  onChange={(v) => updateGeneration({ negativeEmbeddings: v })}
+                  placeholder="e.g. easynegative, badhandv4"
+                />
               </div>
             </div>
           </div>
