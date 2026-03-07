@@ -33,8 +33,8 @@ export default function CharacterSetup() {
     if (!character.outputDir) { console.error("Set an output directory first."); return; }
     await invoke("ensure_dir", { path: character.outputDir });
     const path = `${character.outputDir}/project.json`;
-    const { character: c, shots, settings } = useStore.getState();
-    await invoke("save_project", { path, data: JSON.stringify({ character: c, shots, settings }, null, 2) });
+    const { character: c, generation, settings } = useStore.getState();
+    await invoke("save_project", { path, data: JSON.stringify({ character: c, generation, settings }, null, 2) });
     console.log(`Saved to ${path}`);
   };
 
