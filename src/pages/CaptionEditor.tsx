@@ -233,18 +233,13 @@ export default function CaptionEditor() {
 function ThumbnailItem({ img, selected, onClick }: { img: GeneratedImage; selected: boolean; onClick: () => void }) {
   const [b64, setB64] = useState<string | null>(null);
 
-  const load = useCallback(async () => {
-    if (b64) return;
-    try {
-      const data = await invoke<string>("read_image_b64", { path: img.path });
-      setB64(data);
-    } catch {}
-  }, [img.path, b64]);
+  useEffect(() => {
+    invoke<string>("read_image_b64", { path: img.path }).then(setB64).catch(() => {});
+  }, [img.path]);
 
   return (
     <div
       onClick={onClick}
-      onMouseEnter={load}
       style={{
         padding: "6px",
         cursor: "pointer",

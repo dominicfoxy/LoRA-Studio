@@ -744,8 +744,42 @@ function PoseCategoryPanel({
 
 // ── Page ───────────────────────────────────────────────────────────────────────
 export default function ShotList() {
-  const { generation, updateGeneration, character } = useStore();
+  const { generation, updateGeneration, character, images, updateImage } = useStore();
   const [loraFiles, setLoraFiles] = useState<{ name: string; path: string; dir: string }[]>([]);
+
+  // Track committed outfit trigger words to detect changes
+  const [committedOutfitTriggers, setCommittedOutfitTriggers] = useState<(string | undefined)[]>(
+    generation.outfits.map((o) => o.triggerWord)
+  );
+  const [updatingCaptions, setUpdatingCaptions] = useState(false);
+
+  const outfitTriggerChanges = generation.outfits.reduce<{ oldTrigger: string; newTrigger: string }[]>((acc, outfit, i) => {
+    const old = committedOutfitTriggers[i];
+    const next = outfit.triggerWord;
+    if (old && next && old !== next) acc.push({ oldTrigger: old, newTrigger: next });
+    return acc;
+  }, []);
+  const hasChanges = outfitTriggerChanges.length > 0 && images.length > 0;
+
+  const updateOutfitTriggerCaptions = async () => {
+    setUpdatingCaptions(true);
+    for (const img of images) {
+      let tags = img.caption.split(",").map((t) => t.trim()).filter(Boolean);
+      for (const { oldTrigger, newTrigger } of outfitTriggerChanges) {
+        tags = tags.map((t) => t.toLowerCase() === oldTrigger.toLowerCase() ? newTrigger : t);
+        if (!tags.some((t) => t.toLowerCase() === newTrigger.toLowerCase())) {
+          tags.unshift(newTrigger);
+        }
+      }
+      const updated = tags.join(", ");
+      try {
+        await invoke("save_caption", { imagePath: img.path, caption: updated });
+        updateImage(img.id, { caption: updated });
+      } catch {}
+    }
+    setCommittedOutfitTriggers(generation.outfits.map((o) => o.triggerWord));
+    setUpdatingCaptions(false);
+  };
 
   useEffect(() => {
     if (!character.loraDir) return;
@@ -793,6 +827,27 @@ export default function ShotList() {
           </div>
         }
       />
+      {hasChanges && (
+        <div style={{ padding: "10px 28px", background: "var(--accent-glow)", borderBottom: "1px solid var(--accent-dim)", flexShrink: 0, display: "flex", alignItems: "center", gap: "16px" }}>
+          <span style={{ fontFamily: "var(--font-mono)", fontSize: "11px", color: "var(--accent-bright)", flex: 1 }}>
+            Outfit trigger word{outfitTriggerChanges.length !== 1 ? "s" : ""} changed ({outfitTriggerChanges.map(c => `${c.oldTrigger} → ${c.newTrigger}`).join(", ")}). Update {images.length} caption{images.length !== 1 ? "s" : ""}?
+          </span>
+          <button
+            onClick={updateOutfitTriggerCaptions}
+            disabled={updatingCaptions}
+            style={{ padding: "5px 14px", fontSize: "11px", cursor: "pointer", background: "var(--accent)", border: "none", color: "white", borderRadius: "4px", fontFamily: "var(--font-display)", fontWeight: 700, letterSpacing: "0.04em", flexShrink: 0 }}
+          >
+            {updatingCaptions ? "Updating…" : `Update ${images.length} caption${images.length !== 1 ? "s" : ""}`}
+          </button>
+          <button
+            onClick={() => setCommittedOutfitTriggers(generation.outfits.map((o) => o.triggerWord))}
+            style={{ padding: "5px 14px", fontSize: "11px", cursor: "pointer", background: "transparent", border: "1px solid var(--accent-dim)", color: "var(--accent-bright)", borderRadius: "4px", fontFamily: "var(--font-display)", fontWeight: 600, letterSpacing: "0.04em", flexShrink: 0 }}
+          >
+            Dismiss
+          </button>
+        </div>
+      )}
+
       <div style={{ flex: 1, overflow: "auto", padding: "20px 28px" }}>
         <PoseCategoryPanel
           values={generation.poses}

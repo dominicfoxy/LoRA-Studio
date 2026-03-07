@@ -2,16 +2,25 @@
 
 import { invoke } from "@tauri-apps/api/core";
 
+export interface NetworkVolume {
+  id: string;
+  name: string;
+  size: number;
+  dataCenterId: string;
+}
+
 export interface PodSpec {
   name: string;
   imageName: string;
   gpuTypeId: string;
-  cloudType: "SECURE" | "COMMUNITY";
+  cloudType: "SECURE" | "COMMUNITY" | "ALL";
   containerDiskInGb: number;
   volumeInGb: number;
-  volumeMountPath: string;
+  volumeMountPath?: string;
   env: Array<{ key: string; value: string }>;
   ports?: string;
+  networkVolumeId?: string;
+  dataCenterId?: string;
 }
 
 export interface Pod {
@@ -34,23 +43,52 @@ async function gql(apiKey: string, query: string, variables?: Record<string, unk
   return json.data!;
 }
 
-export async function listGpuTypes(apiKey: string): Promise<Array<{ id: string; displayName: string; memoryInGb: number; secureCloud: boolean; communityCloud: boolean; lowestPrice?: { minimumBidPrice: number; uninterruptablePrice: number } }>> {
+export async function listNetworkVolumes(apiKey: string): Promise<NetworkVolume[]> {
   const data = await gql(apiKey, `
     query {
-      gpuTypes {
-        id
-        displayName
-        memoryInGb
-        secureCloud
-        communityCloud
-        lowestPrice(input: { gpuCount: 1 }) {
-          minimumBidPrice
-          uninterruptablePrice
+      myself {
+        networkVolumes {
+          id
+          name
+          size
+          dataCenterId
         }
       }
     }
   `);
-  return data.gpuTypes;
+  return (data.myself as any).networkVolumes ?? [];
+}
+
+export async function listGpuTypes(apiKey: string, dataCenterId?: string): Promise<Array<{ id: string; displayName: string; memoryInGb: number; secureCloud: boolean; communityCloud: boolean; lowestPrice?: { minimumBidPrice: number; uninterruptablePrice: number } }>> {
+  // Try datacenter-filtered query first; fall back to global if the field isn't supported
+  const tryQuery = async (withDc: boolean) => {
+    const input = withDc && dataCenterId ? `(input: { dataCenterId: "${dataCenterId}" })` : "";
+    const data = await gql(apiKey, `
+      query {
+        gpuTypes${input} {
+          id
+          displayName
+          memoryInGb
+          secureCloud
+          communityCloud
+          lowestPrice(input: { gpuCount: 1 }) {
+            minimumBidPrice
+            uninterruptablePrice
+          }
+        }
+      }
+    `);
+    return (data as any).gpuTypes as any[];
+  };
+
+  if (dataCenterId) {
+    try {
+      return await tryQuery(true);
+    } catch {
+      // dataCenterId filter not supported — fall back to global
+    }
+  }
+  return await tryQuery(false);
 }
 
 export async function createPod(apiKey: string, spec: PodSpec): Promise<Pod> {
@@ -59,7 +97,7 @@ export async function createPod(apiKey: string, spec: PodSpec): Promise<Pod> {
       podFindAndDeployOnDemand(input: $input) {
         id
         name
-        status
+        desiredStatus
         costPerHr
       }
     }
@@ -70,16 +108,19 @@ export async function createPod(apiKey: string, spec: PodSpec): Promise<Pod> {
       gpuTypeId: spec.gpuTypeId,
       cloudType: spec.cloudType,
       containerDiskInGb: spec.containerDiskInGb,
-      volumeInGb: spec.volumeInGb,
-      volumeMountPath: spec.volumeMountPath,
+      volumeInGb: spec.volumeInGb || 5,
+      volumeMountPath: spec.volumeMountPath ?? "/workspace",
       env: spec.env,
-      ports: spec.ports,
+      ...(spec.ports ? { ports: spec.ports } : {}),
       gpuCount: 1,
       minVcpuCount: 2,
       minMemoryInGb: 15,
+      ...(spec.networkVolumeId ? { networkVolumeId: spec.networkVolumeId } : {}),
+      ...(spec.dataCenterId ? { dataCenterId: spec.dataCenterId } : {}),
     }
   });
-  return data.podFindAndDeployOnDemand;
+  const pod = data.podFindAndDeployOnDemand as any;
+  return { ...pod, status: pod.desiredStatus ?? pod.status ?? "PENDING" };
 }
 
 export async function getPod(apiKey: string, podId: string): Promise<Pod> {
@@ -88,7 +129,7 @@ export async function getPod(apiKey: string, podId: string): Promise<Pod> {
       pod(input: { podId: $podId }) {
         id
         name
-        status
+        desiredStatus
         costPerHr
         runtime {
           uptimeInSeconds
@@ -103,7 +144,8 @@ export async function getPod(apiKey: string, podId: string): Promise<Pod> {
       }
     }
   `, { podId });
-  return data.pod;
+  const pod = data.pod as any;
+  return { ...pod, status: pod.desiredStatus ?? pod.status ?? "UNKNOWN" };
 }
 
 export async function terminatePod(apiKey: string, podId: string): Promise<void> {
@@ -121,7 +163,7 @@ export async function listPods(apiKey: string): Promise<Pod[]> {
         pods {
           id
           name
-          status
+          desiredStatus
           costPerHr
           runtime {
             uptimeInSeconds
@@ -130,7 +172,7 @@ export async function listPods(apiKey: string): Promise<Pod[]> {
       }
     }
   `);
-  return data.myself.pods;
+  return ((data as any).myself.pods as any[]).map((p) => ({ ...p, status: p.desiredStatus ?? p.status ?? "UNKNOWN" }));
 }
 
 // GPU recommendations for Kohya SDXL LoRA training
@@ -144,14 +186,35 @@ export const RECOMMENDED_GPUS = [
 
 // Kohya training pod template
 export const KOHYA_POD_TEMPLATE = {
-  imageName: "kohyass/kohya_ss:latest",
-  containerDiskInGb: 20,
+  imageName: "ashleykza/kohya-ss:latest",
+  containerDiskInGb: 10,
   volumeInGb: 30,
   volumeMountPath: "/workspace",
-  ports: "7860/http,22/tcp",
+  ports: "8888/http,7860/http,22/tcp",
 };
 
 // Generate Kohya TOML config for SDXL LoRA
+// ── Jupyter API helpers ────────────────────────────────────────────────────────
+// All Jupyter requests go through Rust/invoke to avoid CORS issues in the webview
+
+export async function jupyterFileExists(jupyterUrl: string, _password: string, _remotePath: string): Promise<boolean> {
+  // Simplified check — just return false to always attempt upload
+  // Full existence check via Rust not yet implemented
+  return false;
+}
+
+export async function jupyterUploadFile(jupyterUrl: string, password: string, remotePath: string, localPath: string): Promise<void> {
+  await invoke("jupyter_upload_file", { jupyterUrl, password, remotePath, localPath });
+}
+
+export async function jupyterRunCommand(jupyterUrl: string, password: string, command: string): Promise<void> {
+  await invoke("jupyter_run_command", { jupyterUrl, password, command });
+}
+
+export async function jupyterRunSync(jupyterUrl: string, password: string, command: string, timeoutSecs: number): Promise<void> {
+  await invoke("jupyter_run_sync", { jupyterUrl, password, command, timeoutSecs });
+}
+
 export function generateKohyaConfig(params: {
   triggerWord: string;
   datasetDir: string;

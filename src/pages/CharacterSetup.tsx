@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { FolderOpen, Save, FolderInput, Clock, X, FilePlus } from "lucide-react";
+import { FolderOpen, Save, FolderInput, Clock, X, FilePlus, RefreshCw, ChevronDown } from "lucide-react";
 import PageHeader from "../components/PageHeader";
 import { useStore, GeneratedImage } from "../store";
 
@@ -27,9 +27,142 @@ const DirField = ({ value, onChange, placeholder }: { value: string; onChange: (
   );
 };
 
+function ModelPicker({ models, value, onChange, onClear }: {
+  models: string[];
+  value: string;
+  onChange: (v: string) => void;
+  onClear: () => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [filter, setFilter] = useState("");
+  const filtered = models.filter((m) => m.toLowerCase().includes(filter.toLowerCase()));
+
+  return (
+    <div style={{ display: "flex", gap: "8px", flex: 1 }}>
+      <div style={{ position: "relative", flex: 1 }}>
+        <div
+          onClick={() => setOpen(!open)}
+          style={{
+            display: "flex", alignItems: "center", justifyContent: "space-between",
+            padding: "6px 10px",
+            background: "var(--bg-1)",
+            border: `1px solid ${open ? "var(--accent-dim)" : "var(--border)"}`,
+            borderRadius: "4px",
+            cursor: "pointer",
+            fontFamily: "var(--font-mono)",
+            fontSize: "14px",
+            color: value ? "var(--text-primary)" : "var(--text-muted)",
+            userSelect: "none",
+          }}
+        >
+          <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+            {value || "— select checkpoint —"}
+          </span>
+          <ChevronDown size={13} color="var(--text-muted)" style={{ flexShrink: 0, marginLeft: "8px" }} />
+        </div>
+        {open && (
+          <div style={{
+            position: "absolute", top: "100%", left: 0, right: 0, zIndex: 200,
+            marginTop: "4px",
+            background: "var(--bg-2)",
+            border: "1px solid var(--border)",
+            borderRadius: "6px",
+            boxShadow: "0 4px 20px rgba(0,0,0,0.5)",
+          }}>
+            <div style={{ padding: "6px 6px 4px" }}>
+              <input
+                autoFocus
+                style={{ width: "100%", fontSize: "11px" }}
+                placeholder="filter…"
+                value={filter}
+                onChange={(e) => setFilter(e.target.value)}
+                onKeyDown={(e) => e.key === "Escape" && setOpen(false)}
+              />
+            </div>
+            <div style={{ maxHeight: "260px", overflowY: "auto" }}>
+              {filtered.length === 0
+                ? <div style={{ padding: "8px 12px", fontFamily: "var(--font-mono)", fontSize: "11px", color: "var(--text-muted)" }}>No matches</div>
+                : filtered.map((m) => (
+                  <div
+                    key={m}
+                    onClick={() => { onChange(m); setOpen(false); setFilter(""); }}
+                    style={{
+                      padding: "7px 12px",
+                      fontFamily: "var(--font-mono)",
+                      fontSize: "11px",
+                      color: m === value ? "var(--accent-bright)" : "var(--text-secondary)",
+                      background: m === value ? "var(--accent-glow)" : "transparent",
+                      borderBottom: "1px solid var(--border)",
+                      cursor: "pointer",
+                      overflow: "hidden",
+                      textOverflow: "ellipsis",
+                      whiteSpace: "nowrap",
+                      transition: "background 0.1s",
+                    }}
+                    onMouseEnter={(e) => { if (m !== value) (e.currentTarget as HTMLDivElement).style.background = "var(--bg-3)"; }}
+                    onMouseLeave={(e) => { if (m !== value) (e.currentTarget as HTMLDivElement).style.background = "transparent"; }}
+                  >
+                    {m}
+                  </div>
+                ))
+              }
+            </div>
+          </div>
+        )}
+      </div>
+      <button className="btn-ghost" onClick={onClear} style={{ flexShrink: 0 }} title="Back to manual input">
+        <X size={13} />
+      </button>
+    </div>
+  );
+}
+
 export default function CharacterSetup() {
-  const { character, setCharacter, settings, setSettings, importProject, images, updateGeneration, clearImages, markSaved } = useStore();
+  const { character, setCharacter, settings, setSettings, importProject, images, updateImage, updateGeneration, clearImages, markSaved } = useStore();
   const [confirmNew, setConfirmNew] = useState(false);
+  const [committedTriggerWord, setCommittedTriggerWord] = useState(character.triggerWord);
+  const [updatingCaptions, setUpdatingCaptions] = useState(false);
+
+  const triggerWordChanged = character.triggerWord !== committedTriggerWord && !!committedTriggerWord && images.length > 0;
+
+  const updateCaptionTrigger = async () => {
+    setUpdatingCaptions(true);
+    const oldTrigger = committedTriggerWord.toLowerCase();
+    const newTrigger = character.triggerWord.toLowerCase();
+    for (const img of images) {
+      const tags = img.caption.split(",").map((t) => t.trim()).filter(Boolean);
+      const replaced = tags.map((t) => t.toLowerCase() === oldTrigger ? newTrigger : t);
+      const withoutNew = replaced.filter((t) => t.toLowerCase() !== newTrigger);
+      const updated = [newTrigger, ...withoutNew].join(", ");
+      try {
+        await invoke("save_caption", { imagePath: img.path, caption: updated });
+        updateImage(img.id, { caption: updated });
+      } catch {}
+    }
+    setCommittedTriggerWord(character.triggerWord);
+    setUpdatingCaptions(false);
+  };
+  const [models, setModels] = useState<string[]>([]);
+  const [loadingModels, setLoadingModels] = useState(false);
+  const [modelError, setModelError] = useState("");
+
+  const fetchModels = async () => {
+    if (!settings.forgeUrl) return;
+    setLoadingModels(true);
+    setModelError("");
+    try {
+      const result = await invoke<Array<{ title: string }>>("forge_get_models", { baseUrl: settings.forgeUrl });
+      if (result.length === 0) {
+        setModelError("No models found");
+      } else {
+        setModels(result.map((m) => m.title));
+      }
+    } catch (e) {
+      setModelError(`Could not reach Forge at ${settings.forgeUrl}`);
+    } finally {
+      setLoadingModels(false);
+    }
+  };
 
   const addToRecents = (name: string, outputDir: string) => {
     const recents = settings.recentProjects ?? [];
@@ -159,6 +292,27 @@ export default function CharacterSetup() {
         </div>
       )}
 
+      {triggerWordChanged && (
+        <div style={{ padding: "10px 28px", background: "var(--accent-glow)", borderBottom: "1px solid var(--accent-dim)", flexShrink: 0, display: "flex", alignItems: "center", gap: "16px" }}>
+          <span style={{ fontFamily: "var(--font-mono)", fontSize: "11px", color: "var(--accent-bright)", flex: 1 }}>
+            Trigger word changed from <strong>{committedTriggerWord}</strong> to <strong>{character.triggerWord}</strong>. Update the tag in {images.length} existing caption{images.length !== 1 ? "s" : ""}?
+          </span>
+          <button
+            onClick={updateCaptionTrigger}
+            disabled={updatingCaptions}
+            style={{ padding: "5px 14px", fontSize: "11px", cursor: "pointer", background: "var(--accent)", border: "none", color: "white", borderRadius: "4px", fontFamily: "var(--font-display)", fontWeight: 700, letterSpacing: "0.04em", flexShrink: 0 }}
+          >
+            {updatingCaptions ? "Updating…" : `Update ${images.length} caption${images.length !== 1 ? "s" : ""}`}
+          </button>
+          <button
+            onClick={() => setCommittedTriggerWord(character.triggerWord)}
+            style={{ padding: "5px 14px", fontSize: "11px", cursor: "pointer", background: "transparent", border: "1px solid var(--accent-dim)", color: "var(--accent-bright)", borderRadius: "4px", fontFamily: "var(--font-display)", fontWeight: 600, letterSpacing: "0.04em", flexShrink: 0 }}
+          >
+            Dismiss
+          </button>
+        </div>
+      )}
+
       <div style={{ flex: 1, overflow: "auto", padding: "28px" }}>
         <div style={{ maxWidth: "680px", display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0 32px" }}>
 
@@ -194,7 +348,40 @@ export default function CharacterSetup() {
 
           <div style={{ gridColumn: "1 / -1" }}>
             <Field label="Base Checkpoint" hint="Model filename as Forge knows it">
-              <input style={{ width: "100%" }} placeholder="illustriousXL_v01.safetensors" value={character.baseModel} onChange={(e) => setCharacter({ baseModel: e.target.value })} />
+              <div style={{ display: "flex", gap: "8px" }}>
+                {models.length > 0 ? (
+                  <ModelPicker
+                    models={models}
+                    value={character.baseModel}
+                    onChange={(v) => setCharacter({ baseModel: v })}
+                    onClear={() => setModels([])}
+                  />
+                ) : (
+                  <>
+                    <input
+                      style={{ flex: 1 }}
+                      placeholder="illustriousXL_v01.safetensors"
+                      value={character.baseModel}
+                      onChange={(e) => setCharacter({ baseModel: e.target.value })}
+                    />
+                    <button
+                      className="btn-ghost"
+                      onClick={fetchModels}
+                      disabled={loadingModels || !settings.forgeUrl}
+                      style={{ flexShrink: 0 }}
+                      title={`Fetch models from ${settings.forgeUrl}`}
+                    >
+                      <RefreshCw size={13} style={{ display: "inline", marginRight: "5px" }} />
+                      {loadingModels ? "…" : "Fetch"}
+                    </button>
+                  </>
+                )}
+              </div>
+              {modelError && (
+                <div style={{ fontFamily: "var(--font-mono)", fontSize: "10px", color: "#d47070", marginTop: "5px" }}>
+                  {modelError}
+                </div>
+              )}
             </Field>
           </div>
 

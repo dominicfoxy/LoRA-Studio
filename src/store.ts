@@ -58,6 +58,25 @@ export interface RecentProject {
   outputDir: string;
 }
 
+export interface VolumeContents {
+  datasetKey: string;   // "{triggerWord}_{zipMtime}" — used to detect stale uploads
+  modelName: string;    // base model filename on the volume
+  uploadedAt: string;   // ISO timestamp
+}
+
+export interface TrainingConfig {
+  gpuTypeId: string;
+  cloudType: "SECURE" | "COMMUNITY" | "ALL";
+  steps: number;
+  learningRate: string;
+  networkDim: number;
+  resolution: number;
+  dockerImage: string;
+  networkVolumeId: string;
+  baseModelLocalPath: string;
+  baseModelDownloadUrl: string;
+}
+
 export interface AppSettings {
   forgeUrl: string;
   comfyUrl: string;
@@ -65,20 +84,24 @@ export interface AppSettings {
   defaultOutputDir: string;
   recentProjects: RecentProject[];
   uiScale: number;
+  volumeContents: Record<string, VolumeContents>; // keyed by volumeId
 }
 
 export interface ProjectState {
   character: CharacterConfig;
   generation: GenerationConfig;
+  training: TrainingConfig;
   images: GeneratedImage[];
   settings: AppSettings;
   generationRunning: boolean;
   generationProgress: { current: number; total: number };
   generationCurrentJob: string;
+  runpodLogs: string[];
 
   setCharacter: (c: Partial<CharacterConfig>) => void;
   setSettings: (s: Partial<AppSettings>) => void;
   updateGeneration: (patch: Partial<GenerationConfig>) => void;
+  updateTraining: (patch: Partial<TrainingConfig>) => void;
   addImage: (img: GeneratedImage) => void;
   updateImage: (id: string, patch: Partial<GeneratedImage>) => void;
   removeImage: (id: string) => void;
@@ -87,6 +110,8 @@ export interface ProjectState {
   setGenerationRunning: (running: boolean) => void;
   setGenerationProgress: (current: number, total: number) => void;
   setGenerationCurrentJob: (job: string) => void;
+  addRunpodLog: (msg: string) => void;
+  clearRunpodLogs: () => void;
   isDirty: boolean;
   markSaved: () => void;
 }
@@ -102,6 +127,19 @@ const defaultCharacter: CharacterConfig = {
   loraDir: "",
 };
 
+const defaultTraining: TrainingConfig = {
+  gpuTypeId: "NVIDIA A100-SXM4-40GB",
+  cloudType: "SECURE",
+  steps: 2000,
+  learningRate: "1e-4",
+  networkDim: 32,
+  resolution: 1024,
+  dockerImage: "ashleykza/kohya-ss:latest",
+  networkVolumeId: "",
+  baseModelLocalPath: "",
+  baseModelDownloadUrl: "",
+};
+
 const defaultSettings: AppSettings = {
   forgeUrl: "http://localhost:7860",
   comfyUrl: "http://localhost:8188",
@@ -109,6 +147,7 @@ const defaultSettings: AppSettings = {
   defaultOutputDir: "",
   recentProjects: [],
   uiScale: 1.0,
+  volumeContents: {},
 };
 
 const defaultGeneration: GenerationConfig = {
@@ -134,19 +173,24 @@ export const useStore = create<ProjectState>()(
     (set) => ({
       character: defaultCharacter,
       generation: defaultGeneration,
+      training: defaultTraining,
       images: [],
       settings: defaultSettings,
       generationRunning: false,
       generationProgress: { current: 0, total: 0 },
       generationCurrentJob: "",
+      runpodLogs: [],
       isDirty: false,
 
       setCharacter: (c) => set((s) => ({ character: { ...s.character, ...c }, isDirty: true })),
       setSettings: (s) => set((st) => ({ settings: { ...st.settings, ...s } })),
       updateGeneration: (patch) => set((s) => ({ generation: { ...s.generation, ...patch }, isDirty: true })),
+      updateTraining: (patch) => set((s) => ({ training: { ...s.training, ...patch } })),
       setGenerationRunning: (running) => set({ generationRunning: running }),
       setGenerationProgress: (current, total) => set({ generationProgress: { current, total } }),
       setGenerationCurrentJob: (job) => set({ generationCurrentJob: job }),
+      addRunpodLog: (msg) => set((s) => ({ runpodLogs: [...s.runpodLogs, msg] })),
+      clearRunpodLogs: () => set({ runpodLogs: [] }),
       markSaved: () => set({ isDirty: false }),
 
       addImage: (img) => set((s) => ({ images: [...s.images, img] })),
@@ -166,7 +210,7 @@ export const useStore = create<ProjectState>()(
     }),
     {
       name: "lora-studio-state",
-      version: 6,
+      version: 8,
       migrate: (persistedState: unknown, version: number) => {
         const state = persistedState as any;
         // v0: flat string fields on shot items
@@ -243,11 +287,20 @@ export const useStore = create<ProjectState>()(
             ),
           };
         }
+        if (version === 6) {
+          state.training = defaultTraining;
+        }
+        // v7→8: add networkVolumeId to training, volumeContents to settings
+        if (version === 7) {
+          state.training = { ...defaultTraining, ...state.training, networkVolumeId: "", baseModelLocalPath: "", baseModelDownloadUrl: "" };
+          state.settings = { ...defaultSettings, ...state.settings, volumeContents: {} };
+        }
         return state;
       },
       partialize: (state) => ({
         character: state.character,
         generation: state.generation,
+        training: state.training,
         images: state.images,
         settings: state.settings,
       }),

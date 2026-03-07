@@ -1,4 +1,4 @@
-import { useState, useRef } from "react";
+import { useState, useRef, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { Play, Square, RotateCcw, Check, X, Zap, ZoomIn, ChevronDown, ChevronUp, Trash2 } from "lucide-react";
 import PageHeader from "../components/PageHeader";
@@ -109,12 +109,6 @@ function ImageCard({ img, onApprove, onReject, onDelete, onLightbox, onPromptHov
   const [loading, setLoading] = useState(false);
   const [deleting, setDeleting] = useState(false);
 
-  const handleDelete = async () => {
-    setDeleting(true);
-    try { await invoke("delete_image", { path: img.path }); } catch {}
-    onDelete();
-  };
-
   const loadImage = async () => {
     if (b64 || loading) return;
     setLoading(true);
@@ -125,6 +119,14 @@ function ImageCard({ img, onApprove, onReject, onDelete, onLightbox, onPromptHov
     setLoading(false);
   };
 
+  useEffect(() => { loadImage(); }, [img.path]);
+
+  const handleDelete = async () => {
+    setDeleting(true);
+    try { await invoke("delete_image", { path: img.path }); } catch {}
+    onDelete();
+  };
+
   const border = img.approved === true ? "2px solid var(--green)"
     : img.approved === false ? "2px solid var(--red)"
     : "1px solid var(--border)";
@@ -132,7 +134,6 @@ function ImageCard({ img, onApprove, onReject, onDelete, onLightbox, onPromptHov
   return (
     <div
       style={{ background: "var(--bg-2)", borderRadius: "6px", border, overflow: "hidden", transition: "border 0.15s" }}
-      onMouseEnter={loadImage}
       onMouseMove={(e) => onPromptHover(img.prompt, e.clientX, e.clientY)}
       onMouseLeave={onPromptLeave}
     >
@@ -142,7 +143,7 @@ function ImageCard({ img, onApprove, onReject, onDelete, onLightbox, onPromptHov
         {b64
           ? <img src={`data:image/png;base64,${b64}`} style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }} />
           : <div style={{ width: "100%", height: "100%", display: "flex", alignItems: "center", justifyContent: "center", fontFamily: "var(--font-mono)", fontSize: "10px", color: "var(--text-muted)" }}>
-              {loading ? "loading…" : "hover to load"}
+              {loading ? "loading…" : ""}
             </div>
         }
         {/* Zoom hint */}
