@@ -1,8 +1,8 @@
 # LoRA Studio — TODO
 
 ## Untested / Needs Verification
-- [~] Test RunPod launcher end-to-end (API key → package → launch pod → monitor) — **in progress**, upload/extract/launch working; dataset path issue being debugged
-- [~] Wet-run: generate a full character dataset and run training on RunPod — **in progress**, blocked on dataset `image_dir` not being found by train_network.py
+- [~] Test RunPod launcher end-to-end (API key → package → launch pod → monitor) — **in progress**, training command confirmed working; last known issue (`[hash]` suffix on model path) fixed; needs full wet-run to confirm training completes
+- [~] Wet-run: generate a full character dataset and run training on RunPod — **in progress**, all pipeline stages working (upload, extract, config, launch via `accelerate launch`); awaiting confirmed successful training run
 - [x] Verify `forge_get_models` is wired to model picker in CharacterSetup — confirmed, uses `invoke("forge_get_models", { baseUrl })`
 
 ## Planned Features
@@ -17,6 +17,9 @@
 ### Caption Editor
 - [ ] Import images from an existing folder — load externally sourced or manually created images into the caption workflow without going through the generator
 - [ ] Keyboard navigation between images (arrow keys)
+
+### UX Pattern: Live Status Mirror
+- [ ] Anywhere there's a log panel monitoring an ongoing process, show a persistent "currently doing X" status line above the log (see `uploadStatus` in RunPodLauncher — updates to reflect current step with elapsed time e.g. `Extracting dataset… (10s)`). Candidates: Batch Generator progress label, Caption Editor save-all feedback.
 
 ### General
 - [ ] Character preset gallery — save and reload full character configs (separate from project save), useful for switching between characters quickly

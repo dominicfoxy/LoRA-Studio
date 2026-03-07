@@ -43,6 +43,8 @@ export default function RunPodLauncher() {
   const [modelOpen, setModelOpen] = useState(false);
   const [modelSelected, setModelSelected] = useState("");
   const [logCopied, setLogCopied] = useState(false);
+  const [autoScroll, setAutoScroll] = useState(true);
+  const logScrollRef = useRef<HTMLDivElement>(null);
 
   const approved = images.filter((i) => i.approved === true);
 
@@ -212,6 +214,12 @@ export default function RunPodLauncher() {
 
   const jupyterUrlRef = useRef("");
   const logPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  useEffect(() => {
+    if (autoScroll && logScrollRef.current) {
+      logScrollRef.current.scrollTop = logScrollRef.current.scrollHeight;
+    }
+  }, [logs, autoScroll]);
   const modelDropdownRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -263,13 +271,23 @@ export default function RunPodLauncher() {
         log(`Config uploaded.`);
       }
 
-      // Unzip dataset — wait for DONE marker (up to 5 min)
+      // Unzip dataset — fire nohup, then poll a marker file (avoids WebSocket early-close issue)
       setUploadStatus(`Extracting dataset on pod…`);
       log(`Extracting dataset…`);
-      await jupyterRunSync(jUrl, JUPYTER_PASS, `cd /workspace && mkdir -p dataset models && unzip -o ${zipName} -d dataset && echo DONE`, 300);
+      await jupyterRunCommand(jUrl, JUPYTER_PASS, `rm -f /workspace/.extract_done; nohup bash -c 'cd /workspace && mkdir -p dataset models && unzip -o ${zipName} -d dataset && echo done > /workspace/.extract_done' &`);
+      let extracted = false;
+      for (let i = 0; i < 60 && !extracted; i++) {
+        await new Promise(r => setTimeout(r, 5000));
+        setUploadStatus(`Extracting dataset… (${(i + 1) * 5}s)`);
+        try {
+          await invoke<string>("jupyter_read_file", { jupyterUrl: jUrl, password: JUPYTER_PASS, remotePath: "workspace/.extract_done" });
+          extracted = true;
+        } catch { /* not done yet */ }
+      }
+      if (!extracted) throw new Error("Dataset extraction timed out after 5 minutes");
 
       // Handle base model checkpoint
-      const modelName = character.baseModel || "model.safetensors";
+      const modelName = (character.baseModel || "model.safetensors").replace(/\s*\[.*?\]\s*$/, "").trim();
       const modelOnVolume = existing?.modelName === modelName;
 
       if (modelOnVolume) {
@@ -305,9 +323,12 @@ export default function RunPodLauncher() {
       // Run training in background
       setUploadStatus(`Launching training…`);
       log(`Launching training…`);
-      log(`[info] python train_network.py --config_file /workspace/kohya_config.toml --resolution ${config.resolution}`);
+      const networkAlpha = Math.floor(config.networkDim / 2);
+      const lrWarmupSteps = Math.round(config.steps * 0.05);
+      const saveEveryNSteps = Math.max(100, Math.round(config.steps / 20));
+      log(`[info] accelerate launch train_network.py --dataset_config /workspace/kohya_config.toml --pretrained_model_name_or_path /workspace/models/${modelName} --max_train_steps ${config.steps}`);
       await jupyterRunCommand(jUrl, JUPYTER_PASS,
-        `nohup bash -c '> /workspace/training.log; SCRIPT=\$(find /workspace -maxdepth 5 -name "train_network.py" 2>/dev/null | head -1); if [ -z "\$SCRIPT" ]; then echo "ERROR: train_network.py not found" >> /workspace/training.log; exit 1; fi; PYTHON=""; for P in /venv/bin/python3 /venv/bin/python /opt/conda/bin/python3 /workspace/venv/bin/python3 /workspace/venv/bin/python /usr/local/bin/python3; do if [ -f "\$P" ] && "\$P" -c "import accelerate" 2>/dev/null; then PYTHON="\$P"; break; fi; done; if [ -z "\$PYTHON" ]; then echo "ERROR: no Python with accelerate found" >> /workspace/training.log; exit 1; fi; echo "python: \$PYTHON" >> /workspace/training.log; echo "workspace:" >> /workspace/training.log; ls /workspace/ 2>&1 >> /workspace/training.log; echo "dataset:" >> /workspace/training.log; ls /workspace/dataset/ 2>&1 | head -20 >> /workspace/training.log; cd "\$(dirname "\$SCRIPT")" && "\$PYTHON" "\$SCRIPT" --config_file /workspace/kohya_config.toml --resolution ${config.resolution} >> /workspace/training.log 2>&1' &`
+        `nohup bash -c '> /workspace/training.log; SCRIPT=\$(find /workspace -maxdepth 5 -name "train_network.py" 2>/dev/null | head -1); if [ -z "\$SCRIPT" ]; then echo "ERROR: train_network.py not found" >> /workspace/training.log; exit 1; fi; PYTHON=""; for P in /venv/bin/python3 /venv/bin/python /opt/conda/bin/python3 /workspace/venv/bin/python3 /workspace/venv/bin/python /usr/local/bin/python3; do if [ -f "\$P" ] && "\$P" -c "import accelerate" 2>/dev/null; then PYTHON="\$P"; break; fi; done; if [ -z "\$PYTHON" ]; then echo "ERROR: no Python with accelerate found" >> /workspace/training.log; exit 1; fi; ACCEL=\$(dirname "\$PYTHON")/accelerate; mkdir -p /workspace/output; echo "launcher: \$ACCEL" >> /workspace/training.log; cd "\$(dirname "\$SCRIPT")" && "\$ACCEL" launch --num_cpu_threads_per_process 1 "\$SCRIPT" --dataset_config /workspace/kohya_config.toml --pretrained_model_name_or_path /workspace/models/${modelName} --output_dir /workspace/output --output_name ${character.triggerWord}_lora --save_model_as safetensors --max_train_steps ${config.steps} --learning_rate ${config.learningRate} --lr_scheduler cosine_with_restarts --lr_warmup_steps ${lrWarmupSteps} --optimizer_type AdamW8bit --network_module networks.lora --network_dim ${config.networkDim} --network_alpha ${networkAlpha} --mixed_precision bf16 --save_precision fp16 --gradient_checkpointing --xformers --save_every_n_steps ${saveEveryNSteps} >> /workspace/training.log 2>&1' &`
       );
 
       setUploadStatus(null);
@@ -340,15 +361,15 @@ export default function RunPodLauncher() {
 
             if (isImportant) {
               log(`[pod] ${line}`);
-              inTraceback = isError;
+              if (isError) inTraceback = true;
             }
           }
 
-          // Stop polling on completion or fatal halt
-          if (/training (finished|complete|done)/i.test(content)) {
+          const newContent = newLines.join("\n");
+          // Stop polling on completion or fatal halt (check only new lines to avoid re-triggering)
+          if (/training (finished|complete|done)/i.test(newContent)) {
             if (logPollRef.current) { clearInterval(logPollRef.current); logPollRef.current = null; }
-            log(`Training complete.`);
-          } else if (/ModuleNotFoundError|No module named|command not found|exit 1/i.test(newLines.join("\n"))) {
+          } else if (/ModuleNotFoundError|No module named|command not found|exit 1/i.test(newContent)) {
             if (logPollRef.current) { clearInterval(logPollRef.current); logPollRef.current = null; }
             log(`Training halted — see errors above.`);
           }
@@ -1096,6 +1117,9 @@ export default function RunPodLauncher() {
               <span style={{ letterSpacing: "0.1em", textTransform: "uppercase", fontSize: "9px", flex: 1 }}>
                 Activity Log
               </span>
+              <button className="btn-ghost" onClick={() => setAutoScroll(a => !a)} style={{ padding: "1px 6px", fontSize: "9px", color: autoScroll ? "var(--accent-bright)" : undefined }}>
+                Auto-scroll
+              </button>
               {logs.length > 0 && (
                 <>
                   <button className="btn-ghost" onClick={() => { navigator.clipboard.writeText(logs.join("\n")); setLogCopied(true); setTimeout(() => setLogCopied(false), 2000); }} style={{ padding: "1px 6px", fontSize: "9px", color: logCopied ? "var(--green)" : undefined }}>
@@ -1112,7 +1136,7 @@ export default function RunPodLauncher() {
                 </span>
               )}
             </div>
-            <div style={{ flex: 1, overflow: "auto", padding: "0 20px 16px" }}>
+            <div ref={logScrollRef} style={{ flex: 1, overflow: "auto", padding: "0 20px 16px" }}>
               {uploadStatus && (
                 <div style={{ color: "var(--accent-bright)", display: "flex", alignItems: "center", gap: "8px", marginBottom: "6px" }}>
                   <RefreshCw size={10} style={{ animation: "spin 1s linear infinite", flexShrink: 0 }} />

@@ -235,17 +235,16 @@ shuffle_caption = true
 caption_dropout_rate = 0.05
 caption_extension = ".txt"
 keep_tokens = 1
-resolution = ${params.resolution}
 
 [[datasets]]
 resolution = ${params.resolution}
 batch_size = 1
-keep_tokens = 1
 
   [[datasets.subsets]]
   image_dir = "${params.datasetDir}"
   class_tokens = "${params.triggerWord}"
   num_repeats = 10
+  keep_tokens = 1
 
 [optimizer_arguments]
 learning_rate = ${params.learningRate}
