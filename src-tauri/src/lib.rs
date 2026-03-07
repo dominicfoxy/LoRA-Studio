@@ -315,18 +315,19 @@ async fn list_lora_files(dir: String) -> Result<Vec<String>, String> {
 
 // Returns (client, xsrf_token, cookie_header_for_websocket)
 async fn jupyter_client_login(jupyter_url: &str, password: &str) -> Result<(reqwest::Client, String, String), String> {
-    let client = reqwest::Client::builder()
+    // No-redirect client to capture Set-Cookie from the 302 login response directly
+    let bare = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(60))
-        .cookie_store(true)
+        .redirect(reqwest::redirect::Policy::none())
         .build()
         .map_err(|e| e.to_string())?;
 
     let login_url = format!("{}/login", jupyter_url);
 
-    // GET login page — XSRF token comes back in Set-Cookie header
-    let get_res = client.get(&login_url).send().await.map_err(|e| e.to_string())?;
+    // GET login page — _xsrf cookie comes back in Set-Cookie
+    let get_res = bare.get(&login_url).send().await.map_err(|e| e.to_string())?;
 
-    // Collect cookies from GET response
+    // Collect all cookies from GET response
     let mut cookies: Vec<String> = get_res.headers()
         .get_all("set-cookie")
         .iter()
@@ -335,38 +336,40 @@ async fn jupyter_client_login(jupyter_url: &str, password: &str) -> Result<(reqw
         .map(|s| s.to_string())
         .collect();
 
-    // Extract _xsrf from Set-Cookie header (more reliable than HTML parsing)
+    // Extract _xsrf value
     let xsrf = cookies.iter()
         .find(|s| s.contains("_xsrf="))
         .and_then(|s| s.split("_xsrf=").nth(1))
         .map(|s| s.to_string())
         .unwrap_or_default();
 
-    // If not in Set-Cookie, try parsing the HTML form field
     let xsrf = if xsrf.is_empty() {
         let html = get_res.text().await.unwrap_or_default();
-        let from_html = html.split("_xsrf").find_map(|chunk| {
+        html.split("_xsrf").find_map(|chunk| {
             chunk.split("value=\"").nth(1).and_then(|s| {
                 let v = s.split('"').next().unwrap_or("");
                 if v.is_empty() { None } else { Some(v.to_string()) }
             })
-        });
-        from_html.unwrap_or_default()
+        }).unwrap_or_default()
     } else {
         xsrf
     };
 
-    // POST login — include _xsrf in both the body and X-XSRFToken header
+    // Build Cookie header to send with POST (so server can validate _xsrf)
+    let cookie_for_post = cookies.join("; ");
+
+    // POST login with no-redirect so we get the 302 Set-Cookie directly
     let body = format!("_xsrf={}&password={}", urlencoding::encode(&xsrf), urlencoding::encode(password));
-    let post_res = client.post(&login_url)
+    let post_res = bare.post(&login_url)
         .header("Content-Type", "application/x-www-form-urlencoded")
         .header("X-XSRFToken", &xsrf)
+        .header("Cookie", &cookie_for_post)
         .body(body)
         .send()
         .await
         .map_err(|e| e.to_string())?;
 
-    // Collect session cookies from POST response (deduplicated by name)
+    // Session cookie is in the 302 response Set-Cookie (before redirect)
     for val in post_res.headers().get_all("set-cookie").iter() {
         if let Ok(s) = val.to_str() {
             if let Some(nv) = s.split(';').next() {
@@ -379,24 +382,34 @@ async fn jupyter_client_login(jupyter_url: &str, password: &str) -> Result<(reqw
     }
 
     let cookie_header = cookies.join("; ");
+
+    // Plain client — no cookie store; callers pass Cookie header explicitly
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(300))
+        .build()
+        .map_err(|e| e.to_string())?;
+
     Ok((client, xsrf, cookie_header))
 }
 
 #[tauri::command]
-async fn jupyter_is_ready(jupyter_url: String) -> bool {
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(10))
-        .build()
-        .unwrap_or_default();
-    client.get(format!("{}/login", jupyter_url))
-        .send().await
-        .map(|r| r.status().as_u16() < 500)
-        .unwrap_or(false)
+async fn jupyter_is_ready(jupyter_url: String, password: String) -> bool {
+    // Login and check the terminal API — confirms Jupyter is fully up, not just the login page
+    match jupyter_client_login(&jupyter_url, &password).await {
+        Ok((client, _xsrf, cookie_header)) => {
+            client.get(format!("{}/api/terminals", jupyter_url))
+                .header("Cookie", &cookie_header)
+                .send().await
+                .map(|r| r.status().is_success())
+                .unwrap_or(false)
+        }
+        Err(_) => false,
+    }
 }
 
 #[tauri::command]
 async fn jupyter_upload_file(jupyter_url: String, password: String, remote_path: String, local_path: String) -> Result<(), String> {
-    let (client, xsrf, _) = jupyter_client_login(&jupyter_url, &password).await?;
+    let (client, xsrf, cookie_header) = jupyter_client_login(&jupyter_url, &password).await?;
 
     let mut file = fs::File::open(&local_path).map_err(|e| e.to_string())?;
     let mut buf = Vec::new();
@@ -407,6 +420,7 @@ async fn jupyter_upload_file(jupyter_url: String, password: String, remote_path:
     let body = serde_json::json!({ "type": "file", "format": "base64", "content": b64 });
 
     let res = client.put(&url)
+        .header("Cookie", &cookie_header)
         .header("X-XSRFToken", &xsrf)
         .header("Content-Type", "application/json")
         .json(&body)
@@ -435,13 +449,16 @@ async fn jupyter_run_sync(jupyter_url: String, password: String, command: String
 
 async fn jupyter_terminal_send(jupyter_url: &str, password: &str, command: &str, wait_secs: Option<u64>) -> Result<(), String> {
     use tokio_tungstenite::tungstenite::Message;
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+    use tokio_tungstenite::tungstenite::http::header;
     use futures_util::{SinkExt, StreamExt};
 
     let (client, xsrf, cookie_header) = jupyter_client_login(jupyter_url, password).await?;
 
-    // Create a new terminal
+    // Create a new terminal — verify it succeeds and capture the terminal name
     let term_url = format!("{}/api/terminals", jupyter_url);
     let term_res = client.post(&term_url)
+        .header("Cookie", &cookie_header)
         .header("X-XSRFToken", &xsrf)
         .json(&serde_json::json!({}))
         .send()
@@ -449,38 +466,53 @@ async fn jupyter_terminal_send(jupyter_url: &str, password: &str, command: &str,
         .map_err(|e| format!("Terminal create failed: {}", e))?;
 
     if !term_res.status().is_success() {
-        return Err(format!("Could not create terminal: {}", term_res.status()));
+        let status = term_res.status();
+        let body = term_res.text().await.unwrap_or_default();
+        return Err(format!("Could not create terminal ({}): {}", status, body));
     }
 
     let term: serde_json::Value = term_res.json().await.map_err(|e| e.to_string())?;
-    let term_name = term["name"].as_str().unwrap_or("1").to_string();
+    // name may be a JSON string or number depending on Jupyter version
+    let term_name = term["name"].as_str()
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| term["name"].as_i64().unwrap_or(1).to_string());
 
     // Build WSS URL
-    let ws_url = jupyter_url.replace("https://", "wss://").replace("http://", "ws://");
-    let ws_url = format!("{}/terminals/websocket/{}", ws_url, term_name);
+    let ws_url = format!(
+        "{}/terminals/websocket/{}",
+        jupyter_url.replace("https://", "wss://").replace("http://", "ws://"),
+        term_name
+    );
 
-    let host = ws_url
-        .trim_start_matches("wss://")
-        .trim_start_matches("ws://")
-        .split('/')
-        .next()
-        .unwrap_or("")
-        .to_string();
-
-    let request = tokio_tungstenite::tungstenite::http::Request::builder()
-        .uri(&ws_url)
-        .header("Host", &host)
-        .header("Cookie", &cookie_header)
-        .header("X-XSRFToken", &xsrf)
-        .body(())
+    // Use into_client_request() — the correct tungstenite API that sets Method + Host
+    let mut request = ws_url.as_str()
+        .into_client_request()
         .map_err(|e| format!("WS request build failed: {}", e))?;
 
-    let tls = native_tls::TlsConnector::new().map_err(|e| e.to_string())?;
-    let connector = tokio_tungstenite::Connector::NativeTls(tls);
+    {
+        let h = request.headers_mut();
+        use tokio_tungstenite::tungstenite::http::header::InvalidHeaderValue;
+        let parse = |s: &str| -> Result<tokio_tungstenite::tungstenite::http::HeaderValue, String> {
+            s.parse::<tokio_tungstenite::tungstenite::http::HeaderValue>().map_err(|e: InvalidHeaderValue| e.to_string())
+        };
+        h.insert(header::ORIGIN,    parse(jupyter_url)?);
+        h.insert(header::COOKIE,    parse(&cookie_header)?);
+        h.insert("x-xsrftoken",     parse(&xsrf)?);
+        h.insert("sec-websocket-protocol", parse("v1.terminal.jupyter.org")?);
+    }
 
-    let (mut ws, _) = tokio_tungstenite::connect_async_tls_with_config(request, None, false, Some(connector))
+    let (mut ws, _) = tokio_tungstenite::connect_async(request)
         .await
-        .map_err(|e| format!("WS terminal connect failed: {}", e))?;
+        .map_err(|e| {
+            // Expose HTTP status when the server rejects the upgrade
+            let detail = match &e {
+                tokio_tungstenite::tungstenite::Error::Http(resp) => {
+                    format!("HTTP {} (url={})", resp.status(), ws_url)
+                }
+                other => format!("{:?} (url={})", other, ws_url),
+            };
+            format!("WS connect failed: {}", detail)
+        })?;
 
     // Send command
     let msg = serde_json::json!(["stdin", format!("{}\n", command)]);
@@ -514,6 +546,21 @@ async fn jupyter_terminal_send(jupyter_url: &str, password: &str, command: &str,
 
     let _ = ws.close(None).await;
     Ok(())
+}
+
+#[tauri::command]
+async fn jupyter_read_file(jupyter_url: String, password: String, remote_path: String) -> Result<String, String> {
+    let (client, _xsrf, cookie_header) = jupyter_client_login(&jupyter_url, &password).await?;
+    let url = format!("{}/api/contents/{}?content=1&format=text&type=file", jupyter_url, remote_path);
+    let res = client.get(&url)
+        .header("Cookie", &cookie_header)
+        .send().await
+        .map_err(|e| e.to_string())?;
+    if !res.status().is_success() {
+        return Err(format!("read failed ({})", res.status()));
+    }
+    let json: serde_json::Value = res.json().await.map_err(|e| e.to_string())?;
+    Ok(json["content"].as_str().unwrap_or("").to_string())
 }
 
 pub fn run() {
@@ -554,6 +601,7 @@ pub fn run() {
             jupyter_upload_file,
             jupyter_run_command,
             jupyter_run_sync,
+            jupyter_read_file,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

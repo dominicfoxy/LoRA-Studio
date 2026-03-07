@@ -1,9 +1,9 @@
 # LoRA Studio — TODO
 
 ## Untested / Needs Verification
-- [ ] Test RunPod launcher end-to-end (API key → package → launch pod → monitor)
-- [ ] Wet-run: generate a full character dataset and run training on RunPod
-- [ ] Verify `forge_get_models` is wired to model picker in CharacterSetup (command exists in Rust, UI status unclear)
+- [~] Test RunPod launcher end-to-end (API key → package → launch pod → monitor) — **in progress**, upload/extract/launch working; dataset path issue being debugged
+- [~] Wet-run: generate a full character dataset and run training on RunPod — **in progress**, blocked on dataset `image_dir` not being found by train_network.py
+- [x] Verify `forge_get_models` is wired to model picker in CharacterSetup — confirmed, uses `invoke("forge_get_models", { baseUrl })`
 
 ## Planned Features
 
@@ -57,23 +57,12 @@ mycharacter, wolf girl, long silver hair, style of artist1, {standing, full body
 
 ---
 
+## Known Issues (pre-v1.0)
+
+- [ ] **RunPod Launcher loses pod connection on navigation** — all pod state (pod ID, Jupyter URL, polling interval, logs) is local React state and is destroyed when the user navigates away from the page. Intentionally left as-is for now since it makes debugging easier. Fix before v1.0: lift pod/polling state into the Zustand store so it survives page changes.
+
+---
+
 ## Done
 
-- [x] Close confirmation dialog — Save & Close / Discard & Close / Cancel on window close when unsaved changes exist
-- [x] UI scale slider in Settings (70–150%, applied via CSS zoom, persisted)
-- [x] Font size improvements across all pages (section labels, hint text, inputs)
-- [x] Auto-requeue toggle on Generate tab — rejected images immediately requeued; starts generation if none running
-- [x] RunPod GraphQL proxied through Rust (fixes CORS error from webview)
-- [x] RunPod GPU pricing — live fetch via Refresh Prices button, updates per Secure/Community selection
-- [x] RunPod estimated training time — computed from GPU benchmarks, steps, and resolution
-- [x] RunPod step suggestion based on dataset size (images × 100, bounded 500–4000)
-- [x] RunPod Kohya config — network_alpha, lr_warmup_steps, save_every_n_epochs now auto-calculated; removed from UI
-- [x] Load saved characters — recent projects list + load from folder/archive on Character Setup
-- [x] Caption Editor — filter bar (approved/pending/all), per-image tag chips, add/remove tags, raw textarea edit, dataset-wide tag panel with bulk disable + Save All
-- [x] Batch Generator requeue — old file deleted only after replacement succeeds
-- [x] Batch Generator purge — sweeps output directory for orphaned files not in store
-- [x] Prompt preview on Shot List (combo 1 of N)
-- [x] Per-pose and per-outfit LoRA attachment
-- [x] Species field in prompt builder
-- [x] Lightbox + prompt tooltip on image cards
-- [x] Positive/negative embedding chip inputs
+Cleared — see git log for completed items.

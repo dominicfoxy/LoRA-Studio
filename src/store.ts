@@ -71,7 +71,6 @@ export interface TrainingConfig {
   learningRate: string;
   networkDim: number;
   resolution: number;
-  dockerImage: string;
   networkVolumeId: string;
   baseModelLocalPath: string;
   baseModelDownloadUrl: string;
@@ -85,6 +84,7 @@ export interface AppSettings {
   recentProjects: RecentProject[];
   uiScale: number;
   volumeContents: Record<string, VolumeContents>; // keyed by volumeId
+  dockerImage: string;
 }
 
 export interface ProjectState {
@@ -134,7 +134,6 @@ const defaultTraining: TrainingConfig = {
   learningRate: "1e-4",
   networkDim: 32,
   resolution: 1024,
-  dockerImage: "ashleykza/kohya-ss:latest",
   networkVolumeId: "",
   baseModelLocalPath: "",
   baseModelDownloadUrl: "",
@@ -148,6 +147,7 @@ const defaultSettings: AppSettings = {
   recentProjects: [],
   uiScale: 1.0,
   volumeContents: {},
+  dockerImage: "ashleykza/kohya:latest",
 };
 
 const defaultGeneration: GenerationConfig = {
@@ -210,7 +210,7 @@ export const useStore = create<ProjectState>()(
     }),
     {
       name: "lora-studio-state",
-      version: 8,
+      version: 9,
       migrate: (persistedState: unknown, version: number) => {
         const state = persistedState as any;
         // v0: flat string fields on shot items
@@ -294,6 +294,18 @@ export const useStore = create<ProjectState>()(
         if (version === 7) {
           state.training = { ...defaultTraining, ...state.training, networkVolumeId: "", baseModelLocalPath: "", baseModelDownloadUrl: "" };
           state.settings = { ...defaultSettings, ...state.settings, volumeContents: {} };
+        }
+        // v8→9: move dockerImage from training to settings
+        if (version === 8) {
+          const inheritedImage = (state.training as any)?.dockerImage;
+          state.settings = { ...defaultSettings, ...state.settings, dockerImage: inheritedImage || defaultSettings.dockerImage };
+          const training = { ...(state.training ?? {}) } as any;
+          delete training.dockerImage;
+          state.training = { ...defaultTraining, ...training };
+        }
+        // ensure dockerImage always present regardless of migration path
+        if (!state.settings?.dockerImage) {
+          state.settings = { ...defaultSettings, ...state.settings, dockerImage: defaultSettings.dockerImage };
         }
         return state;
       },

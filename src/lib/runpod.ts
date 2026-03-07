@@ -235,6 +235,7 @@ shuffle_caption = true
 caption_dropout_rate = 0.05
 caption_extension = ".txt"
 keep_tokens = 1
+resolution = ${params.resolution}
 
 [[datasets]]
 resolution = ${params.resolution}

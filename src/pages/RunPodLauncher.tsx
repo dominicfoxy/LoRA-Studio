@@ -42,6 +42,7 @@ export default function RunPodLauncher() {
   const [modelLoading, setModelLoading] = useState(false);
   const [modelOpen, setModelOpen] = useState(false);
   const [modelSelected, setModelSelected] = useState("");
+  const [logCopied, setLogCopied] = useState(false);
 
   const approved = images.filter((i) => i.approved === true);
 
@@ -65,6 +66,13 @@ export default function RunPodLauncher() {
         .replace(/[_-]/g, " ")     // underscores/hyphens → spaces
         .replace(/\s+/g, " ").trim();
       setModelQuery(seed);
+    }
+  }, [character.baseModel]);
+
+  // Auto-populate local path fallback from character's base model path
+  useEffect(() => {
+    if (character.baseModel && !config.baseModelLocalPath) {
+      setConfig({ baseModelLocalPath: character.baseModel });
     }
   }, [character.baseModel]);
 
@@ -168,7 +176,7 @@ export default function RunPodLauncher() {
       const podSpec = {
         name: `lora-${character.triggerWord}-${Date.now()}`,
         ...KOHYA_POD_TEMPLATE,
-        imageName: config.dockerImage,
+        imageName: settings.dockerImage || "ashleykza/kohya:latest",
         gpuTypeId: config.gpuTypeId,
         cloudType: config.cloudType,
         containerDiskInGb: 20,
@@ -203,6 +211,7 @@ export default function RunPodLauncher() {
   };
 
   const jupyterUrlRef = useRef("");
+  const logPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const modelDropdownRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -293,46 +302,58 @@ export default function RunPodLauncher() {
         setSettings({ volumeContents: { ...settings.volumeContents, [volumeId]: { datasetKey, modelName, uploadedAt: new Date().toISOString() } } });
       }
 
-      // Start Kohya SS web UI
-      setUploadStatus(`Starting Kohya SS…`);
-      log(`Starting Kohya SS (/start_kohya_ss.sh)…`);
-      await jupyterRunCommand(jUrl, JUPYTER_PASS, `nohup /start_kohya_ss.sh > /workspace/kohya_ui.log 2>&1 &`);
-
-      // Derive port-7860 URL from the Jupyter URL
-      const podId = jUrl.replace("https://", "").replace(/-8888\.proxy\.runpod\.net.*/, "");
-      const kohyaUrl = `https://${podId}-7860.proxy.runpod.net`;
-      log(`Waiting for Kohya SS to be ready at ${kohyaUrl}…`);
-
-      await new Promise<void>((resolve) => {
-        let attempts = 0;
-        const interval = setInterval(async () => {
-          attempts++;
-          try {
-            const res = await fetch(kohyaUrl, { signal: AbortSignal.timeout(5000) });
-            if (res.status < 500) {
-              clearInterval(interval);
-              log(`Kohya SS ready.`);
-              resolve();
-              return;
-            }
-          } catch { /* not ready yet */ }
-          if (attempts >= 20) {
-            clearInterval(interval);
-            log(`Kohya SS not responding after 5 min — launching training anyway.`);
-            resolve();
-          }
-        }, 15000);
-      });
-
       // Run training in background
       setUploadStatus(`Launching training…`);
       log(`Launching training…`);
+      log(`[info] python train_network.py --config_file /workspace/kohya_config.toml --resolution ${config.resolution}`);
       await jupyterRunCommand(jUrl, JUPYTER_PASS,
-        `nohup bash -c 'cd /workspace/kohya_ss && python train_network.py --config_file /workspace/kohya_config.toml > /workspace/training.log 2>&1' &`
+        `nohup bash -c '> /workspace/training.log; SCRIPT=\$(find /workspace -maxdepth 5 -name "train_network.py" 2>/dev/null | head -1); if [ -z "\$SCRIPT" ]; then echo "ERROR: train_network.py not found" >> /workspace/training.log; exit 1; fi; PYTHON=""; for P in /venv/bin/python3 /venv/bin/python /opt/conda/bin/python3 /workspace/venv/bin/python3 /workspace/venv/bin/python /usr/local/bin/python3; do if [ -f "\$P" ] && "\$P" -c "import accelerate" 2>/dev/null; then PYTHON="\$P"; break; fi; done; if [ -z "\$PYTHON" ]; then echo "ERROR: no Python with accelerate found" >> /workspace/training.log; exit 1; fi; echo "python: \$PYTHON" >> /workspace/training.log; echo "workspace:" >> /workspace/training.log; ls /workspace/ 2>&1 >> /workspace/training.log; echo "dataset:" >> /workspace/training.log; ls /workspace/dataset/ 2>&1 | head -20 >> /workspace/training.log; cd "\$(dirname "\$SCRIPT")" && "\$PYTHON" "\$SCRIPT" --config_file /workspace/kohya_config.toml --resolution ${config.resolution} >> /workspace/training.log 2>&1' &`
       );
 
       setUploadStatus(null);
-      log(`Training started. Monitor: tail -f /workspace/training.log`);
+      log(`Training started — polling /workspace/training.log for progress…`);
+
+      // Poll training log and mirror important lines to the local log
+      let seenLines = 0;
+      let inTraceback = false;
+      if (logPollRef.current) clearInterval(logPollRef.current);
+      logPollRef.current = setInterval(async () => {
+        try {
+          const content = await invoke<string>("jupyter_read_file", {
+            jupyterUrl: jUrl,
+            password: JUPYTER_PASS,
+            remotePath: "workspace/training.log",
+          });
+          const lines = content.split("\n");
+          const newLines = lines.slice(seenLines);
+          seenLines = lines.length;
+
+          for (const raw of newLines) {
+            const line = raw.trimEnd();
+            if (!line) { inTraceback = false; continue; }
+            // Skip tqdm progress-bar lines (contain block chars or bare percentage bars)
+            if (/[█▏▎▍▌▋▊▉]|^\s*\d+%\s*\|/.test(line)) continue;
+
+            const isError = /error|traceback|exception/i.test(line);
+            const isImportant = isError || inTraceback ||
+              /loss[= ]|epoch|saving|saved|step\s+\d|finished|complete|cuda|oom|python:|workspace:|dataset:/i.test(line);
+
+            if (isImportant) {
+              log(`[pod] ${line}`);
+              inTraceback = isError;
+            }
+          }
+
+          // Stop polling on completion or fatal halt
+          if (/training (finished|complete|done)/i.test(content)) {
+            if (logPollRef.current) { clearInterval(logPollRef.current); logPollRef.current = null; }
+            log(`Training complete.`);
+          } else if (/ModuleNotFoundError|No module named|command not found|exit 1/i.test(newLines.join("\n"))) {
+            if (logPollRef.current) { clearInterval(logPollRef.current); logPollRef.current = null; }
+            log(`Training halted — see errors above.`);
+          }
+        } catch { /* file not yet available */ }
+      }, 5000);
     } catch (err) {
       setUploadStatus(null);
       log(`Upload error: ${err}`);
@@ -349,10 +370,11 @@ export default function RunPodLauncher() {
       setPod(null);
       setJupyterUrl(null);
       jupyterUrlRef.current = "";
+      if (logPollRef.current) { clearInterval(logPollRef.current); logPollRef.current = null; }
       setUploadStatus(null);
       setPhase("done");
     };
-    const interval = setInterval(async () => {
+    const tick = async () => {
       try {
         const updated = await getPod(settings.runpodApiKey, podId);
         consecutiveErrors = 0;
@@ -371,7 +393,7 @@ export default function RunPodLauncher() {
             let attempts = 0;
             const waitInterval = setInterval(async () => {
               attempts++;
-              const ready = await invoke<boolean>("jupyter_is_ready", { jupyterUrl: url });
+              const ready = await invoke<boolean>("jupyter_is_ready", { jupyterUrl: url, password: "lorastudio" });
               if (ready) {
                 clearInterval(waitInterval);
                 log(`Jupyter ready — starting upload…`);
@@ -390,11 +412,19 @@ export default function RunPodLauncher() {
         } else {
           consecutiveErrors++;
           if (consecutiveErrors >= 20) {
-            stopPolling(`Pod unreachable after ${consecutiveErrors} attempts (~5 min) — assuming terminated.`);
+            // If upload/training is already running, API errors are just transient blips — don't terminate
+            if (jupyterUrlRef.current) {
+              log(`RunPod API unreachable (${consecutiveErrors} attempts) — pod likely still running, continuing.`);
+              consecutiveErrors = 0;
+            } else {
+              stopPolling(`Pod unreachable after ${consecutiveErrors} attempts (~5 min) — assuming terminated.`);
+            }
           }
         }
       }
-    }, 15000);
+    };
+    tick();
+    const interval = setInterval(tick, 15000);
     setTimeout(() => { clearInterval(interval); setPolling(false); }, 1800000); // 30min max
   };
 
@@ -771,15 +801,6 @@ export default function RunPodLauncher() {
               Recommended for Illustrious: dim=32, alpha=16, lr=1e-4, 1500–2500 steps depending on dataset size.
             </div>
             <div style={{ marginTop: "12px" }}>
-              <div style={{ fontFamily: "var(--font-mono)", fontSize: "9px", color: "var(--text-muted)", marginBottom: "3px", letterSpacing: "0.06em", textTransform: "uppercase" }}>Docker Image</div>
-              <input
-                style={{ width: "100%", fontSize: "11px" }}
-                value={config.dockerImage}
-                onChange={(e) => setConfig({ dockerImage: e.target.value })}
-                placeholder="e.g. ashleykza/kohya-ss:latest"
-              />
-            </div>
-            <div style={{ marginTop: "12px" }}>
               <div style={{ fontFamily: "var(--font-mono)", fontSize: "9px", color: "var(--text-muted)", marginBottom: "4px", letterSpacing: "0.06em", textTransform: "uppercase" }}>
                 Base Model — Search <span style={{ opacity: 0.6 }}>(CivitAI → HuggingFace)</span>
               </div>
@@ -1055,28 +1076,35 @@ export default function RunPodLauncher() {
           {/* Log terminal */}
           <div style={{
             flex: 1,
-            overflow: "auto",
-            padding: "16px 20px",
+            display: "flex",
+            flexDirection: "column",
             background: "var(--bg-0)",
             fontFamily: "var(--font-mono)",
             fontSize: "11px",
             lineHeight: 1.7,
+            minHeight: 0,
           }}>
             <div style={{
               display: "flex",
               alignItems: "center",
               gap: "8px",
-              marginBottom: "12px",
+              padding: "16px 20px 12px",
               color: "var(--text-muted)",
+              flexShrink: 0,
             }}>
               <Terminal size={12} />
               <span style={{ letterSpacing: "0.1em", textTransform: "uppercase", fontSize: "9px", flex: 1 }}>
                 Activity Log
               </span>
               {logs.length > 0 && (
-                <button className="btn-ghost" onClick={clearRunpodLogs} style={{ padding: "1px 6px", fontSize: "9px" }}>
-                  Clear
-                </button>
+                <>
+                  <button className="btn-ghost" onClick={() => { navigator.clipboard.writeText(logs.join("\n")); setLogCopied(true); setTimeout(() => setLogCopied(false), 2000); }} style={{ padding: "1px 6px", fontSize: "9px", color: logCopied ? "var(--green)" : undefined }}>
+                    {logCopied ? "Copied!" : "Copy"}
+                  </button>
+                  <button className="btn-ghost" onClick={clearRunpodLogs} style={{ padding: "1px 6px", fontSize: "9px" }}>
+                    Clear
+                  </button>
+                </>
               )}
               {logFilePath && (
                 <span style={{ fontSize: "9px", opacity: 0.5, fontFamily: "var(--font-mono)" }} title={logFilePath}>
@@ -1084,49 +1112,28 @@ export default function RunPodLauncher() {
                 </span>
               )}
             </div>
-            {uploadStatus && (
-              <div style={{ color: "var(--accent-bright)", display: "flex", alignItems: "center", gap: "8px", marginBottom: "6px" }}>
-                <RefreshCw size={10} style={{ animation: "spin 1s linear infinite", flexShrink: 0 }} />
-                {uploadStatus}
-              </div>
-            )}
-            {logs.length === 0 && !uploadStatus && (
-              <div style={{ color: "var(--text-muted)" }}>
-                Ready. Package your dataset to begin.
-              </div>
-            )}
-            {logs.map((line, i) => (
-              <div key={i} style={{
-                color: line.includes("ERROR") ? "#d47070" : line.startsWith("[") && line.includes("→") ? "var(--accent-bright)" : line.startsWith("[") ? "var(--text-secondary)" : "var(--text-muted)",
-              }}>
-                {line || <br />}
-              </div>
-            ))}
+            <div style={{ flex: 1, overflow: "auto", padding: "0 20px 16px" }}>
+              {uploadStatus && (
+                <div style={{ color: "var(--accent-bright)", display: "flex", alignItems: "center", gap: "8px", marginBottom: "6px" }}>
+                  <RefreshCw size={10} style={{ animation: "spin 1s linear infinite", flexShrink: 0 }} />
+                  {uploadStatus}
+                </div>
+              )}
+              {logs.length === 0 && !uploadStatus && (
+                <div style={{ color: "var(--text-muted)" }}>
+                  Ready. Package your dataset to begin.
+                </div>
+              )}
+              {logs.map((line, i) => (
+                <div key={i} style={{
+                  color: line.includes("ERROR") ? "#d47070" : line.startsWith("[") && line.includes("→") ? "var(--accent-bright)" : line.startsWith("[") ? "var(--text-secondary)" : "var(--text-muted)",
+                }}>
+                  {line || <br />}
+                </div>
+              ))}
+            </div>
           </div>
 
-          {/* Kohya command reference */}
-          {zipPath && (
-            <div style={{
-              padding: "12px 20px",
-              borderTop: "1px solid var(--border)",
-              background: "var(--bg-1)",
-              flexShrink: 0,
-            }}>
-              <div className="section-label">Training Command (run in pod terminal)</div>
-              <div style={{
-                marginTop: "6px",
-                padding: "8px 12px",
-                background: "var(--bg-0)",
-                borderRadius: "4px",
-                fontFamily: "var(--font-mono)",
-                fontSize: "10px",
-                color: "var(--accent-bright)",
-                userSelect: "all",
-              }}>
-                python /workspace/kohya_ss/train_network.py --config_file /workspace/kohya_config.toml
-              </div>
-            </div>
-          )}
         </div>
       </div>
 

@@ -173,6 +173,16 @@ export default function SettingsPage() {
                 Get your API key at runpod.io/console/user/settings
               </div>
             </div>
+
+            <div style={{ marginBottom: "12px" }}>
+              <div className="section-label">Training Docker Image</div>
+              <input
+                style={{ marginTop: "4px", width: "100%" }}
+                value={settings.dockerImage}
+                onChange={(e) => setSettings({ dockerImage: e.target.value })}
+                placeholder="ashleykza/kohya:latest"
+              />
+            </div>
           </section>
 
           {/* Defaults */}
