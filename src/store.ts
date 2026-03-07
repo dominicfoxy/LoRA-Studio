@@ -1,9 +1,20 @@
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
 
+export interface OutfitEntry {
+  prompt: string;
+  triggerWord?: string;
+  loras?: string[];
+}
+
+export interface PoseEntry {
+  prompt: string;
+  loras?: string[];
+}
+
 export interface GenerationConfig {
-  poses: string[];
-  outfits: string[];
+  poses: PoseEntry[];
+  outfits: OutfitEntry[];
   expressions: string[];
   backgrounds: string[];
   extras: string;
@@ -42,11 +53,18 @@ export interface CharacterConfig {
   loraDir: string;
 }
 
+export interface RecentProject {
+  name: string;
+  outputDir: string;
+}
+
 export interface AppSettings {
   forgeUrl: string;
   comfyUrl: string;
   runpodApiKey: string;
   defaultOutputDir: string;
+  recentProjects: RecentProject[];
+  uiScale: number;
 }
 
 export interface ProjectState {
@@ -54,6 +72,9 @@ export interface ProjectState {
   generation: GenerationConfig;
   images: GeneratedImage[];
   settings: AppSettings;
+  generationRunning: boolean;
+  generationProgress: { current: number; total: number };
+  generationCurrentJob: string;
 
   setCharacter: (c: Partial<CharacterConfig>) => void;
   setSettings: (s: Partial<AppSettings>) => void;
@@ -63,6 +84,11 @@ export interface ProjectState {
   removeImage: (id: string) => void;
   clearImages: () => void;
   importProject: (data: Partial<ProjectState>) => void;
+  setGenerationRunning: (running: boolean) => void;
+  setGenerationProgress: (current: number, total: number) => void;
+  setGenerationCurrentJob: (job: string) => void;
+  isDirty: boolean;
+  markSaved: () => void;
 }
 
 const defaultCharacter: CharacterConfig = {
@@ -81,6 +107,8 @@ const defaultSettings: AppSettings = {
   comfyUrl: "http://localhost:8188",
   runpodApiKey: "",
   defaultOutputDir: "",
+  recentProjects: [],
+  uiScale: 1.0,
 };
 
 const defaultGeneration: GenerationConfig = {
@@ -108,10 +136,18 @@ export const useStore = create<ProjectState>()(
       generation: defaultGeneration,
       images: [],
       settings: defaultSettings,
+      generationRunning: false,
+      generationProgress: { current: 0, total: 0 },
+      generationCurrentJob: "",
+      isDirty: false,
 
-      setCharacter: (c) => set((s) => ({ character: { ...s.character, ...c } })),
+      setCharacter: (c) => set((s) => ({ character: { ...s.character, ...c }, isDirty: true })),
       setSettings: (s) => set((st) => ({ settings: { ...st.settings, ...s } })),
-      updateGeneration: (patch) => set((s) => ({ generation: { ...s.generation, ...patch } })),
+      updateGeneration: (patch) => set((s) => ({ generation: { ...s.generation, ...patch }, isDirty: true })),
+      setGenerationRunning: (running) => set({ generationRunning: running }),
+      setGenerationProgress: (current, total) => set({ generationProgress: { current, total } }),
+      setGenerationCurrentJob: (job) => set({ generationCurrentJob: job }),
+      markSaved: () => set({ isDirty: false }),
 
       addImage: (img) => set((s) => ({ images: [...s.images, img] })),
       updateImage: (id, patch) =>
@@ -125,11 +161,12 @@ export const useStore = create<ProjectState>()(
           generation: data.generation ?? s.generation,
           images: data.images ?? s.images,
           settings: data.settings ?? s.settings,
+          isDirty: false,
         })),
     }),
     {
       name: "lora-studio-state",
-      version: 4,
+      version: 6,
       migrate: (persistedState: unknown, version: number) => {
         const state = persistedState as any;
         // v0: flat string fields on shot items
@@ -184,6 +221,26 @@ export const useStore = create<ProjectState>()(
             cfgScale: state.generation?.cfgScale ?? 7,
             samplerName: state.generation?.samplerName ?? "DPM++ 2M Karras",
             scheduler: state.generation?.scheduler ?? "Karras",
+          };
+        }
+        // v5: poses was string[] — promote to PoseEntry[]
+        if (version === 5) {
+          state.generation = {
+            ...defaultGeneration,
+            ...state.generation,
+            poses: (state.generation?.poses ?? []).map((p: unknown) =>
+              typeof p === "string" ? { prompt: p } : p
+            ),
+          };
+        }
+        // v4: outfits was string[] — promote to OutfitEntry[]
+        if (version === 4) {
+          state.generation = {
+            ...defaultGeneration,
+            ...state.generation,
+            outfits: (state.generation?.outfits ?? []).map((o: unknown) =>
+              typeof o === "string" ? { prompt: o } : o
+            ),
           };
         }
         return state;

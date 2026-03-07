@@ -2,7 +2,8 @@ import { useState, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { Plus, Trash2, ChevronDown, ChevronUp, Layers } from "lucide-react";
 import PageHeader from "../components/PageHeader";
-import { useStore } from "../store";
+import { useStore, OutfitEntry, PoseEntry } from "../store";
+import { normSeg } from "../lib/forge";
 
 const POSE_PRESETS = [
   "standing, full body", "sitting", "kneeling", "lying down", "crouching",
@@ -165,6 +166,214 @@ function CategoryPanel({
   );
 }
 
+// ── Inline LoRA Adder ─────────────────────────────────────────────────────────
+function InlineLoraAdder({ attached, loraFiles, onAdd, onRemove }: {
+  attached: string[];
+  loraFiles: { name: string; path: string; dir: string }[];
+  onAdd: (tag: string) => void;
+  onRemove: (tag: string) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [filter, setFilter] = useState("");
+  const [weights, setWeights] = useState<Record<string, number>>({});
+
+  const getWeight = (name: string) => weights[name] ?? 0.8;
+  const attachedNames = new Set(attached.map((t) => t.replace(/<lora:([^:>]+):[^>]+>/, "$1")));
+  const filtered = loraFiles.filter((l) =>
+    (l.name.toLowerCase().includes(filter.toLowerCase()) || l.dir.toLowerCase().includes(filter.toLowerCase()))
+    && !attachedNames.has(l.name)
+  );
+
+  return (
+    <div style={{ display: "flex", flexWrap: "wrap", gap: "4px", alignItems: "center", paddingLeft: "26px", marginTop: "4px" }}>
+      {attached.map((tag) => {
+        const name = tag.replace(/<lora:([^:>]+):[^>]+>/, "$1");
+        return (
+          <div key={tag} style={{
+            display: "inline-flex", alignItems: "center", gap: "3px",
+            padding: "2px 6px 2px 8px", borderRadius: "3px",
+            background: "var(--accent-glow)", border: "1px solid var(--accent-dim)",
+            fontFamily: "var(--font-mono)", fontSize: "10px", color: "var(--accent-bright)",
+          }}>
+            {name}
+            <button onClick={() => onRemove(tag)} style={{ background: "none", border: "none", cursor: "pointer", color: "var(--accent-bright)", padding: "0 0 0 2px", fontSize: "13px", lineHeight: 1, display: "flex", alignItems: "center" }}>×</button>
+          </div>
+        );
+      })}
+      <div style={{ position: "relative" }}>
+        <button
+          className="btn-ghost"
+          onClick={() => setOpen(!open)}
+          style={{ padding: "2px 8px", fontSize: "10px", color: "var(--text-muted)" }}
+        >＋ lora</button>
+        {open && (
+          <div style={{
+            position: "absolute", top: "100%", left: 0, zIndex: 100, marginTop: "4px",
+            background: "var(--bg-2)", border: "1px solid var(--border)", borderRadius: "6px",
+            padding: "8px", width: "280px", boxShadow: "0 4px 16px rgba(0,0,0,0.4)",
+          }}>
+            <input
+              autoFocus
+              style={{ width: "100%", fontSize: "11px", marginBottom: "6px" }}
+              placeholder="filter…"
+              value={filter}
+              onChange={(e) => setFilter(e.target.value)}
+            />
+            <div style={{ maxHeight: "200px", overflowY: "auto" }}>
+              {filtered.length === 0
+                ? <div style={{ fontFamily: "var(--font-mono)", fontSize: "10px", color: "var(--text-muted)", padding: "4px" }}>No LoRAs found</div>
+                : filtered.map((lora) => (
+                  <div key={lora.path} style={{ display: "flex", alignItems: "center", gap: "6px", padding: "4px 2px", borderBottom: "1px solid var(--border)" }}>
+                    <div style={{ flex: 1, fontFamily: "var(--font-mono)", fontSize: "10px", color: "var(--text-primary)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={lora.dir ? `${lora.dir}/${lora.name}` : lora.name}>
+                      {lora.dir ? <span style={{ color: "var(--text-muted)" }}>{lora.dir}/</span> : null}{lora.name}
+                    </div>
+                    <input
+                      type="number" min={0.1} max={2.0} step={0.1}
+                      value={getWeight(lora.name)}
+                      onChange={(e) => setWeights((w) => ({ ...w, [lora.name]: parseFloat(e.target.value) || 0.8 }))}
+                      style={{ width: "44px", padding: "2px 3px", fontSize: "10px", textAlign: "center" }}
+                    />
+                    <button
+                      onClick={() => { onAdd(`<lora:${lora.name}:${getWeight(lora.name)}>`); setOpen(false); setFilter(""); }}
+                      style={{ padding: "2px 7px", fontSize: "10px", background: "var(--accent-glow)", border: "1px solid var(--accent-dim)", color: "var(--accent-bright)", borderRadius: "3px", cursor: "pointer", fontFamily: "var(--font-display)", fontWeight: 600, letterSpacing: "0.04em", textTransform: "uppercase", flexShrink: 0 }}
+                    >Add</button>
+                  </div>
+                ))
+              }
+            </div>
+            <button onClick={() => setOpen(false)} style={{ marginTop: "6px", width: "100%", padding: "3px", fontSize: "10px", background: "transparent", border: "1px solid var(--border)", color: "var(--text-muted)", borderRadius: "3px", cursor: "pointer" }}>Close</button>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ── Outfit Category Panel ──────────────────────────────────────────────────────
+function OutfitCategoryPanel({
+  values,
+  onChange,
+  presets,
+  loraFiles,
+}: {
+  values: OutfitEntry[];
+  onChange: (v: OutfitEntry[]) => void;
+  presets: string[];
+  loraFiles: { name: string; path: string; dir: string }[];
+}) {
+  const [showPresets, setShowPresets] = useState(false);
+  const [collapsed, setCollapsed] = useState(false);
+
+  const update = (i: number, patch: Partial<OutfitEntry>) => {
+    const next = [...values];
+    next[i] = { ...next[i], ...patch };
+    onChange(next);
+  };
+  const remove = (i: number) => onChange(values.filter((_, idx) => idx !== i));
+  const addPreset = (p: string) => {
+    if (!values.some((v) => v.prompt === p)) onChange([...values, { prompt: p }]);
+  };
+
+  return (
+    <div style={{ border: "1px solid var(--border)", borderRadius: "8px", marginBottom: "12px", overflow: "hidden" }}>
+      <div
+        onClick={() => setCollapsed(!collapsed)}
+        style={{ display: "flex", alignItems: "center", gap: "10px", padding: "10px 16px", cursor: "pointer", background: "var(--bg-3)", userSelect: "none" }}
+      >
+        <div style={{ fontFamily: "var(--font-mono)", fontSize: "12px", color: "#a0c878", textTransform: "uppercase", letterSpacing: "0.08em", fontWeight: 700 }}>
+          Outfits / Clothing
+        </div>
+        <div style={{ fontFamily: "var(--font-mono)", fontSize: "12px", color: "var(--text-muted)" }}>
+          {values.length} variant{values.length !== 1 ? "s" : ""}
+        </div>
+        <div style={{ flex: 1 }} />
+        {collapsed ? <ChevronDown size={13} color="var(--text-muted)" /> : <ChevronUp size={13} color="var(--text-muted)" />}
+      </div>
+
+      {!collapsed && (
+        <div style={{ padding: "12px 16px" }}>
+          {values.map((v, i) => (
+            <div key={i} style={{ marginBottom: "8px" }}>
+              <div style={{ display: "flex", gap: "8px", alignItems: "center" }}>
+                <div style={{ fontFamily: "var(--font-mono)", fontSize: "10px", color: "var(--text-muted)", width: "18px", textAlign: "right", flexShrink: 0 }}>{i + 1}</div>
+                <input
+                  style={{ flex: 1 }}
+                  value={v.prompt}
+                  placeholder="e.g. casual outfit, jeans, a plain white t-shirt"
+                  onChange={(e) => update(i, { prompt: e.target.value })}
+                />
+                <button
+                  onClick={() => remove(i)}
+                  className="btn-ghost"
+                  style={{ padding: "4px 8px", fontSize: "14px", flexShrink: 0, color: "var(--text-muted)", lineHeight: 1 }}
+                >×</button>
+              </div>
+              <div style={{ display: "flex", gap: "8px", alignItems: "center", marginTop: "4px", paddingLeft: "26px" }}>
+                <div style={{ fontFamily: "var(--font-mono)", fontSize: "9px", color: "var(--text-muted)", flexShrink: 0, letterSpacing: "0.08em", textTransform: "uppercase" }}>
+                  Trigger
+                </div>
+                <input
+                  style={{ width: "180px", fontSize: "11px" }}
+                  value={v.triggerWord ?? ""}
+                  placeholder="optional secondary trigger word"
+                  onChange={(e) => update(i, { triggerWord: e.target.value || undefined })}
+                />
+              </div>
+              {loraFiles.length > 0 && (
+                <InlineLoraAdder
+                  attached={v.loras ?? []}
+                  loraFiles={loraFiles}
+                  onAdd={(tag) => update(i, { loras: [...(v.loras ?? []), tag] })}
+                  onRemove={(tag) => update(i, { loras: (v.loras ?? []).filter((l) => l !== tag) })}
+                />
+              )}
+            </div>
+          ))}
+
+          <div style={{ display: "flex", gap: "8px", marginTop: "8px" }}>
+            <button className="btn-ghost" onClick={() => onChange([...values, { prompt: "" }])} style={{ padding: "5px 12px", fontSize: "10px" }}>
+              <Plus size={10} style={{ display: "inline", marginRight: "4px" }} />Add
+            </button>
+            <button
+              className="btn-ghost"
+              onClick={() => setShowPresets(!showPresets)}
+              style={{
+                padding: "5px 12px", fontSize: "10px",
+                background: showPresets ? "var(--accent-glow)" : undefined,
+                border: showPresets ? "1px solid var(--accent-dim)" : undefined,
+                color: showPresets ? "var(--accent-bright)" : undefined,
+              }}
+            >
+              Presets {showPresets ? "▲" : "▼"}
+            </button>
+          </div>
+
+          {showPresets && (
+            <div style={{ display: "flex", gap: "4px", flexWrap: "wrap", marginTop: "8px" }}>
+              {presets.map((p) => (
+                <button
+                  key={p}
+                  onClick={() => addPreset(p)}
+                  style={{
+                    padding: "3px 9px", fontSize: "10px", fontFamily: "var(--font-mono)",
+                    background: values.some((v) => v.prompt === p) ? "var(--accent-glow)" : "var(--bg-3)",
+                    border: `1px solid ${values.some((v) => v.prompt === p) ? "var(--accent-dim)" : "var(--border)"}`,
+                    color: values.some((v) => v.prompt === p) ? "var(--accent-bright)" : "var(--text-muted)",
+                    borderRadius: "3px", cursor: values.some((v) => v.prompt === p) ? "default" : "pointer",
+                    letterSpacing: 0, textTransform: "none", fontWeight: 400,
+                  }}
+                >
+                  {p.length > 36 ? p.slice(0, 36) + "…" : p}
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ── Chip Input (compact, for embeddings) ─────────────────────────────────────
 function ChipInput({ values, onChange, placeholder }: {
   values: string[];
@@ -212,7 +421,7 @@ function ChipInput({ values, onChange, placeholder }: {
 }
 
 // ── LoRA Browser ──────────────────────────────────────────────────────────────
-interface LoraFile { name: string; path: string; }
+interface LoraFile { name: string; path: string; dir: string; }
 
 function LoraBrowser({ onInsert }: { onInsert: (tag: string) => void }) {
   const { character } = useStore();
@@ -220,15 +429,22 @@ function LoraBrowser({ onInsert }: { onInsert: (tag: string) => void }) {
   const [filter, setFilter] = useState("");
   const [weights, setWeights] = useState<Record<string, number>>({});
   const [loaded, setLoaded] = useState(false);
+  const [collapsedDirs, setCollapsedDirs] = useState<Set<string>>(new Set());
 
   const scanLoras = async () => {
     if (!character.loraDir) return;
     try {
       const files = await invoke<string[]>("list_lora_files", { dir: character.loraDir });
-      setLoras(files.map((p) => ({
-        path: p,
-        name: p.split("/").pop()?.replace(/\.(safetensors|pt|ckpt)$/i, "") ?? p,
-      })));
+      const base = character.loraDir.replace(/\\/g, "/").replace(/\/$/, "");
+      setLoras(files.map((p) => {
+        const norm = p.replace(/\\/g, "/");
+        const rel = norm.startsWith(base + "/") ? norm.slice(base.length + 1) : norm;
+        const parts = rel.split("/");
+        const filename = parts.pop()!;
+        const name = filename.replace(/\.(safetensors|pt|ckpt)$/i, "");
+        const dir = parts.join("/");
+        return { name, path: norm, dir };
+      }));
       setLoaded(true);
     } catch (e) {
       console.error("LoRA scan failed:", e);
@@ -237,8 +453,23 @@ function LoraBrowser({ onInsert }: { onInsert: (tag: string) => void }) {
 
   useEffect(() => { if (character.loraDir) scanLoras(); }, [character.loraDir]);
 
-  const filtered = loras.filter((l) => l.name.toLowerCase().includes(filter.toLowerCase()));
+  const toggleDir = (dir: string) =>
+    setCollapsedDirs((s) => { const n = new Set(s); n.has(dir) ? n.delete(dir) : n.add(dir); return n; });
+
   const getWeight = (name: string) => weights[name] ?? 0.8;
+
+  const filtered = loras.filter((l) =>
+    l.name.toLowerCase().includes(filter.toLowerCase()) ||
+    l.dir.toLowerCase().includes(filter.toLowerCase())
+  );
+
+  // Group by directory
+  const groups: [string, LoraFile[]][] = [];
+  for (const lora of filtered) {
+    const last = groups[groups.length - 1];
+    if (last && last[0] === lora.dir) last[1].push(lora);
+    else groups.push([lora.dir, [lora]]);
+  }
 
   if (!character.loraDir) {
     return (
@@ -263,27 +494,45 @@ function LoraBrowser({ onInsert }: { onInsert: (tag: string) => void }) {
         ? <div style={{ fontFamily: "var(--font-mono)", fontSize: "11px", color: "var(--text-muted)" }}>Scanning…</div>
         : filtered.length === 0
           ? <div style={{ fontFamily: "var(--font-mono)", fontSize: "11px", color: "var(--text-muted)" }}>No LoRAs found</div>
-          : filtered.map((lora) => (
-            <div key={lora.path} style={{ display: "flex", alignItems: "center", gap: "8px", padding: "6px 0", borderBottom: "1px solid var(--border)" }}>
-              <div style={{ flex: 1, fontFamily: "var(--font-mono)", fontSize: "11px", color: "var(--text-primary)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                {lora.name}
-              </div>
-              <input
-                type="number" min={0.1} max={2.0} step={0.1}
-                value={getWeight(lora.name)}
-                onChange={(e) => setWeights((w) => ({ ...w, [lora.name]: parseFloat(e.target.value) || 0.8 }))}
-                style={{ width: "52px", padding: "2px 4px", fontSize: "11px", textAlign: "center" }}
-              />
-              <button
-                onClick={() => onInsert(`<lora:${lora.name}:${getWeight(lora.name)}>`)}
-                style={{
-                  padding: "3px 8px", fontSize: "10px",
-                  background: "var(--accent-glow)", border: "1px solid var(--accent-dim)",
-                  color: "var(--accent-bright)", borderRadius: "3px", cursor: "pointer",
-                  fontFamily: "var(--font-display)", fontWeight: 600, letterSpacing: "0.05em",
-                  textTransform: "uppercase",
-                }}
-              >+ Insert</button>
+          : groups.map(([dir, files]) => (
+            <div key={dir || "__root__"}>
+              {dir && (
+                <div
+                  onClick={() => toggleDir(dir)}
+                  style={{
+                    padding: "4px 0", marginTop: "4px",
+                    fontFamily: "var(--font-mono)", fontSize: "10px",
+                    color: "var(--text-muted)", letterSpacing: "0.08em",
+                    cursor: "pointer", userSelect: "none",
+                    display: "flex", alignItems: "center", gap: "5px",
+                  }}
+                >
+                  {collapsedDirs.has(dir) ? "▶" : "▼"} {dir}/
+                </div>
+              )}
+              {!collapsedDirs.has(dir) && files.map((lora) => (
+                <div key={lora.path} style={{ display: "flex", alignItems: "center", gap: "8px", padding: "5px 0", borderBottom: "1px solid var(--border)", paddingLeft: dir ? "12px" : "0" }}>
+                  <div style={{ flex: 1, fontFamily: "var(--font-mono)", fontSize: "11px", color: "var(--text-primary)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={lora.name}>
+                    {lora.name}
+                  </div>
+                  <input
+                    type="number" min={0.1} max={2.0} step={0.1}
+                    value={getWeight(lora.name)}
+                    onChange={(e) => setWeights((w) => ({ ...w, [lora.name]: parseFloat(e.target.value) || 0.8 }))}
+                    style={{ width: "52px", padding: "2px 4px", fontSize: "11px", textAlign: "center" }}
+                  />
+                  <button
+                    onClick={() => onInsert(`<lora:${lora.name}:${getWeight(lora.name)}>`)}
+                    style={{
+                      padding: "3px 8px", fontSize: "10px",
+                      background: "var(--accent-glow)", border: "1px solid var(--accent-dim)",
+                      color: "var(--accent-bright)", borderRadius: "3px", cursor: "pointer",
+                      fontFamily: "var(--font-display)", fontWeight: 600, letterSpacing: "0.05em",
+                      textTransform: "uppercase",
+                    }}
+                  >+ Insert</button>
+                </div>
+              ))}
             </div>
           ))
       }
@@ -420,9 +669,98 @@ function SettingsPanel() {
   );
 }
 
+// ── Pose Category Panel ────────────────────────────────────────────────────────
+function PoseCategoryPanel({
+  values,
+  onChange,
+  presets,
+  loraFiles,
+}: {
+  values: PoseEntry[];
+  onChange: (v: PoseEntry[]) => void;
+  presets: string[];
+  loraFiles: { name: string; path: string; dir: string }[];
+}) {
+  const [showPresets, setShowPresets] = useState(false);
+  const [collapsed, setCollapsed] = useState(false);
+
+  const update = (i: number, patch: Partial<PoseEntry>) => {
+    const next = [...values]; next[i] = { ...next[i], ...patch }; onChange(next);
+  };
+  const remove = (i: number) => onChange(values.filter((_, idx) => idx !== i));
+  const addPreset = (p: string) => {
+    if (!values.some((v) => v.prompt === p)) onChange([...values, { prompt: p }]);
+  };
+
+  return (
+    <div style={{ border: "1px solid var(--border)", borderRadius: "8px", marginBottom: "12px", overflow: "hidden" }}>
+      <div onClick={() => setCollapsed(!collapsed)} style={{ display: "flex", alignItems: "center", gap: "10px", padding: "10px 16px", cursor: "pointer", background: "var(--bg-3)", userSelect: "none" }}>
+        <div style={{ fontFamily: "var(--font-mono)", fontSize: "12px", color: "var(--accent-bright)", textTransform: "uppercase", letterSpacing: "0.08em", fontWeight: 700 }}>Poses / Framing</div>
+        <div style={{ fontFamily: "var(--font-mono)", fontSize: "12px", color: "var(--text-muted)" }}>{values.length} variant{values.length !== 1 ? "s" : ""}</div>
+        <div style={{ flex: 1 }} />
+        {collapsed ? <ChevronDown size={13} color="var(--text-muted)" /> : <ChevronUp size={13} color="var(--text-muted)" />}
+      </div>
+      {!collapsed && (
+        <div style={{ padding: "12px 16px" }}>
+          {values.map((v, i) => (
+            <div key={i} style={{ marginBottom: "8px" }}>
+              <div style={{ display: "flex", gap: "8px", alignItems: "center" }}>
+                <div style={{ fontFamily: "var(--font-mono)", fontSize: "10px", color: "var(--text-muted)", width: "18px", textAlign: "right", flexShrink: 0 }}>{i + 1}</div>
+                <input style={{ flex: 1 }} value={v.prompt} placeholder="e.g. standing, full body, arms crossed" onChange={(e) => update(i, { prompt: e.target.value })} />
+                <button onClick={() => remove(i)} className="btn-ghost" style={{ padding: "4px 8px", fontSize: "14px", flexShrink: 0, color: "var(--text-muted)", lineHeight: 1 }}>×</button>
+              </div>
+              {loraFiles.length > 0 && (
+                <InlineLoraAdder
+                  attached={v.loras ?? []}
+                  loraFiles={loraFiles}
+                  onAdd={(tag) => update(i, { loras: [...(v.loras ?? []), tag] })}
+                  onRemove={(tag) => update(i, { loras: (v.loras ?? []).filter((l) => l !== tag) })}
+                />
+              )}
+            </div>
+          ))}
+          <div style={{ display: "flex", gap: "8px", marginTop: "8px" }}>
+            <button className="btn-ghost" onClick={() => onChange([...values, { prompt: "" }])} style={{ padding: "5px 12px", fontSize: "10px" }}>
+              <Plus size={10} style={{ display: "inline", marginRight: "4px" }} />Add
+            </button>
+            <button className="btn-ghost" onClick={() => setShowPresets(!showPresets)} style={{ padding: "5px 12px", fontSize: "10px", background: showPresets ? "var(--accent-glow)" : undefined, border: showPresets ? "1px solid var(--accent-dim)" : undefined, color: showPresets ? "var(--accent-bright)" : undefined }}>
+              Presets {showPresets ? "▲" : "▼"}
+            </button>
+          </div>
+          {showPresets && (
+            <div style={{ display: "flex", gap: "4px", flexWrap: "wrap", marginTop: "8px" }}>
+              {presets.map((p) => (
+                <button key={p} onClick={() => addPreset(p)} style={{ padding: "3px 9px", fontSize: "10px", fontFamily: "var(--font-mono)", background: values.some((v) => v.prompt === p) ? "var(--accent-glow)" : "var(--bg-3)", border: `1px solid ${values.some((v) => v.prompt === p) ? "var(--accent-dim)" : "var(--border)"}`, color: values.some((v) => v.prompt === p) ? "var(--accent-bright)" : "var(--text-muted)", borderRadius: "3px", cursor: values.some((v) => v.prompt === p) ? "default" : "pointer", letterSpacing: 0, textTransform: "none", fontWeight: 400 }}>
+                  {p.length > 36 ? p.slice(0, 36) + "…" : p}
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ── Page ───────────────────────────────────────────────────────────────────────
 export default function ShotList() {
   const { generation, updateGeneration, character } = useStore();
+  const [loraFiles, setLoraFiles] = useState<{ name: string; path: string; dir: string }[]>([]);
+
+  useEffect(() => {
+    if (!character.loraDir) return;
+    invoke<string[]>("list_lora_files", { dir: character.loraDir }).then((files) => {
+      const base = character.loraDir.replace(/\\/g, "/").replace(/\/$/, "");
+      setLoraFiles(files.map((p) => {
+        const norm = p.replace(/\\/g, "/");
+        const rel = norm.startsWith(base + "/") ? norm.slice(base.length + 1) : norm;
+        const parts = rel.split("/");
+        const filename = parts.pop()!;
+        const name = filename.replace(/\.(safetensors|pt|ckpt)$/i, "");
+        return { name, path: norm, dir: parts.join("/") };
+      }));
+    }).catch(() => {});
+  }, [character.loraDir]);
 
   const permCount =
     Math.max(1, generation.poses.length) *
@@ -435,13 +773,14 @@ export default function ShotList() {
     character.triggerWord,
     character.baseDescription,
     character.artistTags ? `style of ${character.artistTags}` : "",
-    generation.poses[0] ?? "",
-    generation.outfits[0] ?? "",
+    generation.poses[0]?.prompt ?? "",
+    generation.outfits[0]?.triggerWord ?? "",
+    generation.outfits[0]?.prompt ?? "",
     generation.expressions[0] ?? "",
     generation.backgrounds[0] ?? "",
     generation.extras,
     ...generation.loras,
-  ].filter((s) => s && s.trim()).join(", ");
+  ].map((s) => normSeg(s)).filter((s) => s.length > 0).join(", ");
 
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100%" }}>
@@ -455,13 +794,11 @@ export default function ShotList() {
         }
       />
       <div style={{ flex: 1, overflow: "auto", padding: "20px 28px" }}>
-        <CategoryPanel
-          label="Poses / Framing"
+        <PoseCategoryPanel
           values={generation.poses}
           onChange={(v) => updateGeneration({ poses: v })}
           presets={POSE_PRESETS}
-          placeholder="e.g. standing, full body, arms crossed"
-          accentColor="var(--accent-bright)"
+          loraFiles={loraFiles}
         />
         <CategoryPanel
           label="Expressions"
@@ -471,13 +808,11 @@ export default function ShotList() {
           placeholder="e.g. smiling and tired, looking away"
           accentColor="#7eb8d4"
         />
-        <CategoryPanel
-          label="Outfits / Clothing"
+        <OutfitCategoryPanel
           values={generation.outfits}
           onChange={(v) => updateGeneration({ outfits: v })}
           presets={OUTFIT_PRESETS}
-          placeholder="e.g. casual outfit, jeans, a plain white t-shirt"
-          accentColor="#a0c878"
+          loraFiles={loraFiles}
         />
         <CategoryPanel
           label="Backgrounds"

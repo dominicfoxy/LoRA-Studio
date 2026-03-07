@@ -1,6 +1,6 @@
 // RunPod REST API client for pod management and dataset upload
 
-const RUNPOD_BASE = "https://api.runpod.io/graphql";
+import { invoke } from "@tauri-apps/api/core";
 
 export interface PodSpec {
   name: string;
@@ -26,17 +26,12 @@ export interface Pod {
 }
 
 async function gql(apiKey: string, query: string, variables?: Record<string, unknown>) {
-  const res = await fetch(RUNPOD_BASE, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${apiKey}`,
-    },
-    body: JSON.stringify({ query, variables }),
-  });
-  const json = await res.json();
+  const json = await invoke<{ data?: Record<string, unknown>; errors?: Array<{ message: string }> }>(
+    "runpod_graphql",
+    { apiKey, query, variables: variables ?? {} }
+  );
   if (json.errors) throw new Error(json.errors[0].message);
-  return json.data;
+  return json.data!;
 }
 
 export async function listGpuTypes(apiKey: string): Promise<Array<{ id: string; displayName: string; memoryInGb: number; secureCloud: boolean; communityCloud: boolean; lowestPrice?: { minimumBidPrice: number; uninterruptablePrice: number } }>> {
@@ -139,11 +134,12 @@ export async function listPods(apiKey: string): Promise<Pod[]> {
 }
 
 // GPU recommendations for Kohya SDXL LoRA training
+// stepsPerSec: approximate throughput at 1024×1024, batch=1, bf16, gradient checkpointing
 export const RECOMMENDED_GPUS = [
-  { id: "NVIDIA A100 80GB PCIe", label: "A100 80GB — Best, ~$2.49 USD/hr", vram: 80 },
-  { id: "NVIDIA A100-SXM4-40GB", label: "A100 40GB — Great, ~$1.64 USD/hr", vram: 40 },
-  { id: "NVIDIA RTX A6000", label: "RTX A6000 48GB — Good, ~$0.99 USD/hr", vram: 48 },
-  { id: "NVIDIA GeForce RTX 3090", label: "RTX 3090 24GB — Budget, ~$0.44 USD/hr", vram: 24 },
+  { id: "NVIDIA A100 80GB PCIe",    label: "A100 80GB",      vram: 80, stepsPerSec: 3.2 },
+  { id: "NVIDIA A100-SXM4-40GB",   label: "A100 40GB",      vram: 40, stepsPerSec: 2.8 },
+  { id: "NVIDIA RTX A6000",         label: "RTX A6000 48GB", vram: 48, stepsPerSec: 1.8 },
+  { id: "NVIDIA GeForce RTX 3090",  label: "RTX 3090 24GB",  vram: 24, stepsPerSec: 1.0 },
 ];
 
 // Kohya training pod template
@@ -164,9 +160,12 @@ export function generateKohyaConfig(params: {
   steps: number;
   learningRate: string;
   networkDim: number;
-  networkAlpha: number;
   resolution: number;
 }): string {
+  const networkAlpha = Math.floor(params.networkDim / 2);
+  const lrWarmupSteps = Math.round(params.steps * 0.05);
+  const saveEveryNSteps = Math.max(100, Math.round(params.steps / 20));
+
   return `[general]
 enable_bucket = true
 shuffle_caption = true
@@ -187,7 +186,7 @@ keep_tokens = 1
 [optimizer_arguments]
 learning_rate = ${params.learningRate}
 lr_scheduler = "cosine_with_restarts"
-lr_warmup_steps = 100
+lr_warmup_steps = ${lrWarmupSteps}
 optimizer_type = "AdamW8bit"
 
 [training_arguments]
@@ -195,7 +194,7 @@ pretrained_model_name_or_path = "${params.baseModel}"
 output_dir = "${params.outputDir}"
 output_name = "${params.triggerWord}_lora"
 save_model_as = "safetensors"
-save_every_n_steps = 100
+save_every_n_steps = ${saveEveryNSteps}
 max_train_steps = ${params.steps}
 mixed_precision = "bf16"
 save_precision = "fp16"
@@ -207,10 +206,10 @@ max_data_loader_n_workers = 2
 [network_arguments]
 network_module = "networks.lora"
 network_dim = ${params.networkDim}
-network_alpha = ${params.networkAlpha}
+network_alpha = ${networkAlpha}
 
 [sample_prompt_arguments]
-sample_every_n_steps = 100
+sample_every_n_steps = ${saveEveryNSteps}
 sample_sampler = "euler_a"
 `;
 }

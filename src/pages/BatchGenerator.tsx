@@ -2,10 +2,9 @@ import { useState, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { Play, Square, RotateCcw, Check, X, Zap, ZoomIn, ChevronDown, ChevronUp, Trash2 } from "lucide-react";
 import PageHeader from "../components/PageHeader";
-import { useStore, GeneratedImage } from "../store";
-import { base64ToBytes, deriveCaption } from "../lib/forge";
+import { useStore, GeneratedImage, OutfitEntry, PoseEntry } from "../store";
+import { base64ToBytes, deriveCaption, normSeg } from "../lib/forge";
 
-type Status = "idle" | "running" | "done";
 
 function humanizeError(err: unknown): string {
   const s = String(err);
@@ -22,7 +21,7 @@ function humanizeError(err: unknown): string {
 
 function buildFullPrompt(
   character: { triggerWord: string; species: string; baseDescription: string; artistTags: string },
-  combo: { pose: string; outfit: string; expression: string; background: string; extras: string; loras: string[] },
+  combo: { pose: PoseEntry; outfit: OutfitEntry; expression: string; background: string; extras: string; loras: string[] },
   positiveEmbeddings: string[]
 ) {
   return [
@@ -30,11 +29,16 @@ function buildFullPrompt(
     character.species,
     character.baseDescription,
     character.artistTags ? `style of ${character.artistTags}` : "",
-    combo.pose, combo.outfit, combo.expression, combo.background, combo.extras,
+    combo.pose.prompt,
+    combo.outfit.triggerWord ?? "",
+    combo.outfit.prompt,
+    combo.expression, combo.background, combo.extras,
     ...combo.loras,
+    ...(combo.pose.loras ?? []),
+    ...(combo.outfit.loras ?? []),
     ...positiveEmbeddings,
     "masterpiece, best quality, highres",
-  ].filter((s) => s && s.trim()).join(", ");
+  ].map((s) => normSeg(s)).filter((s) => s.length > 0).join(", ");
 }
 
 function cartesian(arrays: string[][]): string[][] {
@@ -65,13 +69,41 @@ function Lightbox({ b64, onClose }: { b64: string; onClose: () => void }) {
   );
 }
 
+// ── Prompt Tooltip ────────────────────────────────────────────────────────────
+function PromptTooltip({ prompt, x, y }: { prompt: string; x: number; y: number }) {
+  return (
+    <div style={{
+      position: "fixed",
+      left: x + 14,
+      top: y + 14,
+      zIndex: 2000,
+      maxWidth: "420px",
+      padding: "8px 12px",
+      background: "rgba(10,10,14,0.95)",
+      border: "1px solid var(--border)",
+      borderRadius: "6px",
+      boxShadow: "0 4px 20px rgba(0,0,0,0.6)",
+      fontFamily: "var(--font-mono)",
+      fontSize: "10px",
+      color: "var(--text-secondary)",
+      lineHeight: 1.6,
+      pointerEvents: "none",
+      wordBreak: "break-word",
+    }}>
+      {prompt}
+    </div>
+  );
+}
+
 // ── Image Card ────────────────────────────────────────────────────────────────
-function ImageCard({ img, onApprove, onReject, onDelete, onLightbox }: {
+function ImageCard({ img, onApprove, onReject, onDelete, onLightbox, onPromptHover, onPromptLeave }: {
   img: GeneratedImage;
   onApprove: () => void;
   onReject: () => void;
   onDelete: () => void;
   onLightbox: (b64: string) => void;
+  onPromptHover: (prompt: string, x: number, y: number) => void;
+  onPromptLeave: () => void;
 }) {
   const [b64, setB64] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -98,7 +130,12 @@ function ImageCard({ img, onApprove, onReject, onDelete, onLightbox }: {
     : "1px solid var(--border)";
 
   return (
-    <div style={{ background: "var(--bg-2)", borderRadius: "6px", border, overflow: "hidden", transition: "border 0.15s" }} onMouseEnter={loadImage}>
+    <div
+      style={{ background: "var(--bg-2)", borderRadius: "6px", border, overflow: "hidden", transition: "border 0.15s" }}
+      onMouseEnter={loadImage}
+      onMouseMove={(e) => onPromptHover(img.prompt, e.clientX, e.clientY)}
+      onMouseLeave={onPromptLeave}
+    >
       {/* Image area */}
       <div style={{ aspectRatio: "1", background: "var(--bg-3)", position: "relative", cursor: b64 ? "zoom-in" : "default" }}
         onClick={() => b64 && onLightbox(b64)}>
@@ -136,12 +173,14 @@ function ImageCard({ img, onApprove, onReject, onDelete, onLightbox }: {
   );
 }
 
+// Module-level refs — survive component unmount/remount
+const abortRef = { current: false };
+// Points to the live queue array during generation so onReject can append to it
+const liveQueueRef = { current: null as Array<{ prompt: string; shotId: string; width: number; height: number; sourceImageId?: string; sourceImagePath?: string }> | null };
+
 // ── Main Component ────────────────────────────────────────────────────────────
 export default function BatchGenerator() {
-  const { character, generation, images, addImage, updateImage, removeImage, clearImages, settings } = useStore();
-  const [status, setStatus] = useState<Status>("idle");
-  const [currentJob, setCurrentJob] = useState("");
-  const [queuePos, setQueuePos] = useState({ current: 0, total: 0 });
+  const { character, generation, images, addImage, updateImage, removeImage, clearImages, settings, generationRunning, setGenerationRunning, generationProgress, setGenerationProgress, generationCurrentJob, setGenerationCurrentJob } = useStore();
   const [lastError, setLastError] = useState("");
   const [lightboxB64, setLightboxB64] = useState<string | null>(null);
   const [thumbSize, setThumbSize] = useState(220);
@@ -150,7 +189,8 @@ export default function BatchGenerator() {
   const [confirmPurge, setConfirmPurge] = useState(false);
   const [confirmGenerate, setConfirmGenerate] = useState(false);
   const [approvedExpanded, setApprovedExpanded] = useState(false);
-  const abortRef = useRef(false);
+  const [autoRequeue, setAutoRequeue] = useState(false);
+  const [tooltip, setTooltip] = useState<{ prompt: string; x: number; y: number } | null>(null);
 
   const pending = images.filter((i) => i.approved === null);
   const approved = images.filter((i) => i.approved === true);
@@ -158,16 +198,17 @@ export default function BatchGenerator() {
 
   const runGeneration = async (queue: Array<{ prompt: string; shotId: string; width: number; height: number; sourceImageId?: string; sourceImagePath?: string }>) => {
     abortRef.current = false;
-    setStatus("running");
+    liveQueueRef.current = queue;
+    setGenerationRunning(true);
     setLastError("");
-    setQueuePos({ current: 0, total: queue.length });
+    setGenerationProgress(0, queue.length);
     await new Promise((r) => setTimeout(r, 0)); // flush React paint before loop
 
     for (let i = 0; i < queue.length; i++) {
       if (abortRef.current) break;
       const { prompt, shotId, width, height, sourceImageId, sourceImagePath } = queue[i];
-      setQueuePos({ current: i + 1, total: queue.length });
-      setCurrentJob(prompt.split(",").slice(0, 4).join(", "));
+      setGenerationProgress(i + 1, queue.length); // queue.length re-evaluated each iteration
+      setGenerationCurrentJob(prompt);
       const seed = Math.floor(Math.random() * 2147483647);
 
       try {
@@ -192,7 +233,11 @@ export default function BatchGenerator() {
         const imageId = `${Date.now()}_${seed}`;
         const imagePath = `${character.outputDir}/${imageId}.png`;
         await invoke("save_image_bytes", { path: imagePath, data: Array.from(imageBytes) });
-        const caption = deriveCaption(prompt, character.triggerWord);
+        const caption = deriveCaption(prompt, character.triggerWord, {
+          species: character.species,
+          baseDescription: character.baseDescription,
+          artistTags: character.artistTags,
+        });
         await invoke("save_caption", { imagePath, caption });
         addImage({ id: imageId, shotId, path: imagePath, prompt, caption, approved: null, seed, width, height });
         // If this was a requeue, delete the old file and remove it from store now that replacement succeeded
@@ -205,20 +250,28 @@ export default function BatchGenerator() {
         console.error("Generation error:", err);
       }
     }
-    setStatus("done");
-    setCurrentJob("");
+    liveQueueRef.current = null;
+    setGenerationRunning(false);
+    setGenerationCurrentJob("");
   };
 
   const generateAll = async () => {
     if (!character.triggerWord) return setLastError("Set a trigger word on Character Setup first.");
     if (!character.outputDir) return setLastError("Set an output directory first.");
 
-    const poseDim = generation.poses.length > 0 ? generation.poses : [""];
-    const outfitDim = generation.outfits.length > 0 ? generation.outfits : [""];
+    const poseDim: PoseEntry[] = generation.poses.length > 0 ? generation.poses : [{ prompt: "" }];
+    const outfitDim: OutfitEntry[] = generation.outfits.length > 0 ? generation.outfits : [{ prompt: "" }];
     const exprDim = generation.expressions.length > 0 ? generation.expressions : [""];
     const bgDim = generation.backgrounds.length > 0 ? generation.backgrounds : [""];
 
-    let combos = cartesian([poseDim, outfitDim, exprDim, bgDim]);
+    // Cartesian of string dims, then combine with PoseEntry/OutfitEntry dims
+    const stringCombos = cartesian([exprDim, bgDim]);
+    type Combo = [PoseEntry, OutfitEntry, string, string];
+    let combos: Combo[] = stringCombos.flatMap(([expression, background]) =>
+      poseDim.flatMap((pose) =>
+        outfitDim.map((outfit) => [pose, outfit, expression, background] as Combo)
+      )
+    );
 
     if (genMode === "random" && combos.length > randomN) {
       for (let i = combos.length - 1; i > 0; i--) {
@@ -231,7 +284,7 @@ export default function BatchGenerator() {
     const queue = combos.flatMap(([pose, outfit, expression, background]) =>
       Array.from({ length: generation.count }, () => ({
         prompt: buildFullPrompt(character, { pose, outfit, expression, background, extras: generation.extras, loras: generation.loras }, generation.positiveEmbeddings),
-        shotId: `${pose}|${outfit}|${expression}|${background}`,
+        shotId: `${pose.prompt}|${outfit.prompt}|${expression}|${background}`,
         width: generation.width,
         height: generation.height,
       }))
@@ -255,11 +308,25 @@ export default function BatchGenerator() {
     await runGeneration(queue);
   };
 
-  const purgeAll = async () => {
+  const purgeDirectory = async () => {
+    // Delete all store-tracked images
     for (const img of images) {
       try { await invoke("delete_image", { path: img.path }); } catch {}
     }
+    // Also sweep the output directory for any orphaned images not in the store
+    if (character.outputDir) {
+      try {
+        const remaining = await invoke<string[]>("list_images_in_dir", { dir: character.outputDir });
+        for (const p of remaining) {
+          try { await invoke("delete_image", { path: p }); } catch {}
+        }
+      } catch {}
+    }
     clearImages();
+  };
+
+  const purgeAll = async () => {
+    await purgeDirectory();
     setConfirmPurge(false);
   };
 
@@ -273,16 +340,14 @@ export default function BatchGenerator() {
 
   const purgeAndGenerate = async () => {
     setConfirmGenerate(false);
-    for (const img of images) {
-      try { await invoke("delete_image", { path: img.path }); } catch {}
-    }
-    clearImages();
+    await purgeDirectory();
     generateAll();
   };
 
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100%" }}>
       {lightboxB64 && <Lightbox b64={lightboxB64} onClose={() => setLightboxB64(null)} />}
+      {tooltip && <PromptTooltip prompt={tooltip.prompt} x={tooltip.x} y={tooltip.y} />}
 
       <PageHeader
         title="Batch Generator"
@@ -320,20 +385,38 @@ export default function BatchGenerator() {
                 />
               )}
             </div>
-            {images.length > 0 && status === "idle" && (
+            {/* Auto-requeue toggle */}
+            <button
+              onClick={() => setAutoRequeue(!autoRequeue)}
+              style={{
+                padding: "4px 10px", fontSize: "10px",
+                background: autoRequeue ? "rgba(74,154,106,0.15)" : "var(--bg-3)",
+                border: `1px solid ${autoRequeue ? "var(--green)" : "var(--border)"}`,
+                color: autoRequeue ? "var(--green)" : "var(--text-muted)",
+                borderRadius: "3px", cursor: "pointer",
+                fontFamily: "var(--font-display)", fontWeight: 600,
+                letterSpacing: "0.05em", textTransform: "uppercase",
+              }}
+              title="Automatically requeue rejected images while generation is running"
+            >
+              <RotateCcw size={10} style={{ display: "inline", marginRight: "4px" }} />
+              Auto-requeue
+            </button>
+
+            {images.length > 0 && !generationRunning && (
               <button className="btn-danger" onClick={() => setConfirmPurge(true)} style={{ opacity: 0.8 }}>
                 <Trash2 size={12} style={{ display: "inline", marginRight: "5px" }} />
                 Purge
               </button>
             )}
-            {rejected.length > 0 && status === "idle" && (
+            {rejected.length > 0 && !generationRunning && (
               <button className="btn-primary" onClick={requeueRejected}>
                 <RotateCcw size={12} style={{ display: "inline", marginRight: "5px" }} />
                 Requeue {rejected.length}
               </button>
             )}
-            {status === "running" ? (
-              <button className="btn-danger" onClick={() => { abortRef.current = true; setStatus("idle"); }}>
+            {generationRunning ? (
+              <button className="btn-danger" onClick={() => { abortRef.current = true; }}>
                 <Square size={12} style={{ display: "inline", marginRight: "5px" }} />Stop
               </button>
             ) : (
@@ -345,14 +428,19 @@ export default function BatchGenerator() {
         }
       />
 
-      {status === "running" && (
-        <div style={{ padding: "10px 28px", background: "var(--accent-glow)", borderBottom: "1px solid var(--accent-dim)", display: "flex", alignItems: "center", gap: "16px", flexShrink: 0 }}>
-          <div style={{ width: "8px", height: "8px", borderRadius: "50%", background: "var(--accent-bright)", animation: "pulse 1s infinite" }} />
-          <div style={{ fontFamily: "var(--font-mono)", fontSize: "11px", color: "var(--accent-bright)", flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-            {queuePos.current} / {queuePos.total} · {currentJob}
+      {generationRunning && (
+        <div style={{ padding: "8px 28px", background: "var(--accent-glow)", borderBottom: "1px solid var(--accent-dim)", flexShrink: 0 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: "16px", marginBottom: "5px" }}>
+            <div style={{ width: "8px", height: "8px", borderRadius: "50%", background: "var(--accent-bright)", animation: "pulse 1s infinite", flexShrink: 0 }} />
+            <div style={{ fontFamily: "var(--font-mono)", fontSize: "11px", color: "var(--accent-bright)", flex: 1 }}>
+              {generationProgress.current} / {generationProgress.total}
+            </div>
+            <div style={{ width: "200px", height: "3px", background: "var(--bg-3)", borderRadius: "2px", overflow: "hidden", flexShrink: 0 }}>
+              <div style={{ width: `${(generationProgress.current / generationProgress.total) * 100}%`, height: "100%", background: "var(--accent)", transition: "width 0.3s" }} />
+            </div>
           </div>
-          <div style={{ width: "200px", height: "3px", background: "var(--bg-3)", borderRadius: "2px", overflow: "hidden", flexShrink: 0 }}>
-            <div style={{ width: `${(queuePos.current / queuePos.total) * 100}%`, height: "100%", background: "var(--accent)", transition: "width 0.3s" }} />
+          <div style={{ fontFamily: "var(--font-mono)", fontSize: "10px", color: "var(--accent-bright)", opacity: 0.75, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", paddingLeft: "24px" }}>
+            {generationCurrentJob}
           </div>
         </div>
       )}
@@ -367,7 +455,7 @@ export default function BatchGenerator() {
       {confirmGenerate && (
         <div style={{ padding: "12px 28px", background: "var(--accent-glow)", borderBottom: "1px solid var(--accent-dim)", flexShrink: 0, display: "flex", alignItems: "center", gap: "10px", flexWrap: "wrap" }}>
           <span style={{ fontFamily: "var(--font-mono)", fontSize: "11px", color: "var(--accent-bright)", flex: 1, minWidth: "200px" }}>
-            {images.length} image{images.length !== 1 ? "s" : ""} already exist. What would you like to do?
+            {images.length} image{images.length !== 1 ? "s" : ""} already exist. "Purge &amp; redo" will also flush the output directory.
           </span>
           <button onClick={() => { setConfirmGenerate(false); generateAll(); }} style={{
             padding: "5px 14px", fontSize: "11px", cursor: "pointer",
@@ -393,7 +481,7 @@ export default function BatchGenerator() {
       {confirmPurge && (
         <div style={{ padding: "10px 28px", background: "rgba(154,74,74,0.12)", borderBottom: "1px solid var(--red)", flexShrink: 0, display: "flex", alignItems: "center", gap: "16px" }}>
           <span style={{ fontFamily: "var(--font-mono)", fontSize: "11px", color: "#d47070", flex: 1 }}>
-            This will permanently delete all {images.length} image{images.length !== 1 ? "s" : ""} and caption files from disk. This cannot be undone.
+            This will permanently delete all images and caption files from the output directory — including any not tracked in this session. This cannot be undone.
           </span>
           <button onClick={purgeAll} style={{
             padding: "5px 14px", fontSize: "11px", cursor: "pointer",
@@ -439,9 +527,21 @@ export default function BatchGenerator() {
                 {[...pending, ...rejected].map((img) => (
                   <ImageCard key={img.id} img={img}
                     onApprove={() => updateImage(img.id, { approved: true })}
-                    onReject={() => updateImage(img.id, { approved: false })}
+                    onReject={() => {
+                      updateImage(img.id, { approved: false });
+                      if (autoRequeue && img.approved !== false) {
+                        const job = { prompt: img.prompt, shotId: img.shotId, width: img.width ?? generation.width, height: img.height ?? generation.height, sourceImageId: img.id, sourceImagePath: img.path };
+                        if (liveQueueRef.current) {
+                          liveQueueRef.current.push(job);
+                        } else {
+                          runGeneration([job]);
+                        }
+                      }
+                    }}
                     onDelete={() => removeImage(img.id)}
                     onLightbox={setLightboxB64}
+                    onPromptHover={(prompt, x, y) => setTooltip({ prompt, x, y })}
+                    onPromptLeave={() => setTooltip(null)}
                   />
                 ))}
               </div>
@@ -475,9 +575,21 @@ export default function BatchGenerator() {
                       {approved.map((img) => (
                         <ImageCard key={img.id} img={img}
                           onApprove={() => updateImage(img.id, { approved: true })}
-                          onReject={() => updateImage(img.id, { approved: false })}
+                          onReject={() => {
+                            updateImage(img.id, { approved: false });
+                            if (autoRequeue) {
+                              const job = { prompt: img.prompt, shotId: img.shotId, width: img.width ?? generation.width, height: img.height ?? generation.height, sourceImageId: img.id, sourceImagePath: img.path };
+                              if (liveQueueRef.current) {
+                                liveQueueRef.current.push(job);
+                              } else {
+                                runGeneration([job]);
+                              }
+                            }
+                          }}
                           onDelete={() => removeImage(img.id)}
                           onLightbox={setLightboxB64}
+                          onPromptHover={(prompt, x, y) => setTooltip({ prompt, x, y })}
+                          onPromptLeave={() => setTooltip(null)}
                         />
                       ))}
                     </div>

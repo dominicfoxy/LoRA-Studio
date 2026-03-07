@@ -28,8 +28,8 @@ export default function PageHeader({ title, subtitle, actions }: PageHeaderProps
           <p style={{
             fontFamily: "var(--font-body)",
             fontStyle: "italic",
-            fontSize: "13px",
-            color: "var(--text-muted)",
+            fontSize: "14px",
+            color: "var(--text-secondary)",
             marginTop: "4px",
           }}>{subtitle}</p>
         )}

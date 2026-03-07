@@ -1,8 +1,10 @@
 import { Routes, Route, NavLink, useLocation } from "react-router-dom";
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import {
   User, List, Image, AlignLeft, Server, Settings, ChevronRight, SlidersHorizontal
 } from "lucide-react";
+import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import CharacterSetup from "./pages/CharacterSetup";
 import ShotList from "./pages/ShotList";
 import GeneratorSettings from "./pages/GeneratorSettings";
@@ -26,7 +28,45 @@ export default function App() {
   const location = useLocation();
   const character = useStore((s) => s.character);
   const images = useStore((s) => s.images);
+  const isDirty = useStore((s) => s.isDirty);
+  const markSaved = useStore((s) => s.markSaved);
+  const uiScale = useStore((s) => s.settings.uiScale ?? 1.0);
   const approved = images.filter((i) => i.approved === true).length;
+  const [showCloseDialog, setShowCloseDialog] = useState(false);
+
+  useEffect(() => {
+    document.documentElement.style.zoom = String(uiScale);
+  }, [uiScale]);
+
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    listen("close-requested-check", async () => {
+      if (useStore.getState().isDirty) {
+        setShowCloseDialog(true);
+      } else {
+        await invoke("close_app");
+      }
+    }).then((fn) => { unlisten = fn; });
+    return () => { unlisten?.(); };
+  }, []);
+
+  const saveAndClose = async () => {
+    const { character: c, generation, settings, images: imgs } = useStore.getState();
+    if (c.outputDir) {
+      await invoke("ensure_dir", { path: c.outputDir });
+      await invoke("save_project", {
+        path: `${c.outputDir}/project.json`,
+        data: JSON.stringify({ character: c, generation, settings, images: imgs }, null, 2),
+      });
+      markSaved();
+    }
+    await invoke("close_app");
+  };
+
+  const discardAndClose = async () => {
+    markSaved();
+    await invoke("close_app");
+  };
 
   return (
     <div style={{ display: "flex", height: "100vh", background: "var(--bg-0)" }}>
@@ -131,9 +171,9 @@ export default function App() {
                   }}>{label}</div>
                   <div style={{
                     fontFamily: "var(--font-mono)",
-                    fontSize: "9px",
+                    fontSize: "10px",
                     color: "var(--text-muted)",
-                    letterSpacing: "0.06em",
+                    letterSpacing: "0.04em",
                   }}>{sub}</div>
                 </div>
                 {active && <ChevronRight size={11} color="var(--accent-dim)" />}
@@ -167,6 +207,57 @@ export default function App() {
           <Route path="/settings" element={<SettingsPage />} />
         </Routes>
       </main>
+
+      {/* Unsaved changes dialog */}
+      {showCloseDialog && (
+        <div style={{
+          position: "fixed", inset: 0,
+          background: "rgba(0,0,0,0.6)",
+          display: "flex", alignItems: "center", justifyContent: "center",
+          zIndex: 1000,
+        }}>
+          <div style={{
+            background: "var(--bg-1)",
+            border: "1px solid var(--border)",
+            borderRadius: "10px",
+            padding: "28px 32px",
+            maxWidth: "380px",
+            width: "100%",
+            boxShadow: "0 8px 32px rgba(0,0,0,0.5)",
+          }}>
+            <div style={{ fontFamily: "var(--font-display)", fontSize: "16px", fontWeight: 800, color: "var(--text-primary)", marginBottom: "8px" }}>
+              Unsaved Changes
+            </div>
+            <div style={{ fontFamily: "var(--font-body)", fontSize: "13px", color: "var(--text-secondary)", marginBottom: "24px", lineHeight: 1.5 }}>
+              {character.outputDir
+                ? "You have unsaved changes. Save before closing?"
+                : "You have unsaved changes but no output directory is set — they cannot be saved."}
+            </div>
+            <div style={{ display: "flex", gap: "8px", justifyContent: "flex-end" }}>
+              <button
+                onClick={() => setShowCloseDialog(false)}
+                style={{ padding: "7px 16px", fontSize: "12px", cursor: "pointer", background: "transparent", border: "1px solid var(--border)", color: "var(--text-muted)", borderRadius: "5px", fontFamily: "var(--font-display)", fontWeight: 600, letterSpacing: "0.05em" }}
+              >
+                Cancel
+              </button>
+              <button
+                onClick={discardAndClose}
+                style={{ padding: "7px 16px", fontSize: "12px", cursor: "pointer", background: "transparent", border: "1px solid var(--red)", color: "var(--red)", borderRadius: "5px", fontFamily: "var(--font-display)", fontWeight: 600, letterSpacing: "0.05em" }}
+              >
+                Discard &amp; Close
+              </button>
+              {character.outputDir && (
+                <button
+                  onClick={saveAndClose}
+                  style={{ padding: "7px 16px", fontSize: "12px", cursor: "pointer", background: "var(--accent)", border: "none", color: "white", borderRadius: "5px", fontFamily: "var(--font-display)", fontWeight: 700, letterSpacing: "0.05em" }}
+                >
+                  Save &amp; Close
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

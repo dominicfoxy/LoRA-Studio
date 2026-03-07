@@ -1,6 +1,8 @@
 use std::fs;
 use std::io::{Write, Read};
 use std::path::Path;
+use tauri::Emitter;
+use flate2::read::GzDecoder;
 use serde::{Deserialize, Serialize};
 use base64::{Engine as _, engine::general_purpose};
 use tauri_plugin_dialog::DialogExt;
@@ -74,7 +76,7 @@ async fn forge_get_progress(base_url: String) -> Result<serde_json::Value, Strin
     res.json::<serde_json::Value>().await.map_err(|e| e.to_string())
 }
 
-// ── Directory picker ──────────────────────────────────────────────────────────
+// ── Pickers ───────────────────────────────────────────────────────────────────
 
 #[tauri::command]
 async fn pick_directory(app: tauri::AppHandle) -> Result<Option<String>, String> {
@@ -83,6 +85,51 @@ async fn pick_directory(app: tauri::AppHandle) -> Result<Option<String>, String>
         let _ = tx.send(folder.map(|p| p.to_string()));
     });
     rx.await.map_err(|e: tokio::sync::oneshot::error::RecvError| e.to_string())
+}
+
+#[tauri::command]
+async fn pick_file(app: tauri::AppHandle, filter_name: String, extensions: Vec<String>) -> Result<Option<String>, String> {
+    let (tx, rx) = tokio::sync::oneshot::channel::<Option<String>>();
+    let exts: Vec<&str> = extensions.iter().map(|s| s.as_str()).collect();
+    app.dialog()
+        .file()
+        .add_filter(&filter_name, &exts)
+        .pick_file(move |file| {
+            let _ = tx.send(file.map(|p| p.to_string()));
+        });
+    rx.await.map_err(|e: tokio::sync::oneshot::error::RecvError| e.to_string())
+}
+
+#[tauri::command]
+async fn extract_archive(archive_path: String, dest_dir: String) -> Result<(), String> {
+    fs::create_dir_all(&dest_dir).map_err(|e| e.to_string())?;
+    let lower = archive_path.to_lowercase();
+
+    if lower.ends_with(".zip") {
+        let file = fs::File::open(&archive_path).map_err(|e| e.to_string())?;
+        let mut archive = zip::ZipArchive::new(file).map_err(|e| e.to_string())?;
+        for i in 0..archive.len() {
+            let mut entry = archive.by_index(i).map_err(|e| e.to_string())?;
+            let out_path = Path::new(&dest_dir).join(entry.name());
+            if entry.is_dir() {
+                fs::create_dir_all(&out_path).map_err(|e| e.to_string())?;
+            } else {
+                if let Some(parent) = out_path.parent() {
+                    fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+                }
+                let mut out_file = fs::File::create(&out_path).map_err(|e| e.to_string())?;
+                std::io::copy(&mut entry, &mut out_file).map_err(|e| e.to_string())?;
+            }
+        }
+    } else if lower.ends_with(".tar.gz") || lower.ends_with(".tgz") {
+        let file = fs::File::open(&archive_path).map_err(|e| e.to_string())?;
+        let mut archive = tar::Archive::new(GzDecoder::new(file));
+        archive.unpack(&dest_dir).map_err(|e| e.to_string())?;
+    } else {
+        return Err(format!("Unsupported archive format: {}", archive_path));
+    }
+
+    Ok(())
 }
 
 // ── File I/O ──────────────────────────────────────────────────────────────────
@@ -200,13 +247,44 @@ async fn ensure_dir(path: String) -> Result<(), String> {
     fs::create_dir_all(&path).map_err(|e| e.to_string())
 }
 
+#[tauri::command]
+async fn close_app(window: tauri::Window) -> Result<(), String> {
+    window.destroy().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn runpod_graphql(api_key: String, query: String, variables: serde_json::Value) -> Result<serde_json::Value, String> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    let body = serde_json::json!({ "query": query, "variables": variables });
+
+    let res = client
+        .post("https://api.runpod.io/graphql")
+        .header("Authorization", format!("Bearer {}", api_key))
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("Request failed: {}", e))?;
+
+    if !res.status().is_success() {
+        let status = res.status();
+        let text = res.text().await.unwrap_or_default();
+        return Err(format!("RunPod error {}: {}", status, text));
+    }
+
+    res.json::<serde_json::Value>().await.map_err(|e| format!("Parse error: {}", e))
+}
+
 
 #[tauri::command]
 async fn list_lora_files(dir: String) -> Result<Vec<String>, String> {
     let path = Path::new(&dir);
     if !path.exists() { return Ok(vec![]); }
     let mut files = vec![];
-    for entry in walkdir::WalkDir::new(path).max_depth(2) {
+    for entry in walkdir::WalkDir::new(path) {
         let entry = entry.map_err(|e| e.to_string())?;
         let p = entry.path();
         if let Some(ext) = p.extension() {
@@ -222,12 +300,20 @@ async fn list_lora_files(dir: String) -> Result<Vec<String>, String> {
 
 pub fn run() {
     tauri::Builder::default()
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                api.prevent_close();
+                let _ = window.emit("close-requested-check", ());
+            }
+        })
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_http::init())
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
             pick_directory,
+            pick_file,
+            extract_archive,
             forge_txt2img,
             forge_get_models,
             forge_get_progress,
@@ -242,6 +328,8 @@ pub fn run() {
             load_project,
             ensure_dir,
             list_lora_files,
+            close_app,
+            runpod_graphql,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -15,7 +15,6 @@ interface TrainingConfig {
   steps: number;
   learningRate: string;
   networkDim: number;
-  networkAlpha: number;
   resolution: number;
 }
 
@@ -25,7 +24,6 @@ const DEFAULT_CONFIG: TrainingConfig = {
   steps: 2000,
   learningRate: "1e-4",
   networkDim: 32,
-  networkAlpha: 16,
   resolution: 1024,
 };
 
@@ -41,9 +39,23 @@ export default function RunPodLauncher() {
   const [activePods, setActivePods] = useState<Pod[]>([]);
   const [polling, setPolling] = useState(false);
   const [confirmLowImages, setConfirmLowImages] = useState(false);
+  const [livePrices, setLivePrices] = useState<Record<string, { secure: number; community: number }> | null>(null);
+  const [fetchingPrices, setFetchingPrices] = useState(false);
 
   const approved = images.filter((i) => i.approved === true);
   const hasApiKey = !!settings.runpodApiKey;
+
+  const estimatedTime = (() => {
+    const gpu = RECOMMENDED_GPUS.find((g) => g.id === config.gpuTypeId);
+    if (!gpu) return null;
+    // Resolution scaling: throughput roughly proportional to (1024/res)^1.5
+    const resFactor = Math.pow(1024 / config.resolution, 1.5);
+    const sps = gpu.stepsPerSec * resFactor;
+    const seconds = config.steps / sps;
+    if (seconds < 60) return `~${Math.round(seconds)}s`;
+    if (seconds < 3600) return `~${Math.round(seconds / 60)}min`;
+    return `~${(seconds / 3600).toFixed(1)}hr`;
+  })();
 
   const log = (msg: string) => setLogs((l) => [...l, `[${new Date().toLocaleTimeString()}] ${msg}`]);
 
@@ -73,7 +85,6 @@ export default function RunPodLauncher() {
         steps: config.steps,
         learningRate: config.learningRate,
         networkDim: config.networkDim,
-        networkAlpha: config.networkAlpha,
         resolution: config.resolution,
       });
 
@@ -164,6 +175,25 @@ export default function RunPodLauncher() {
     }
   };
 
+  const fetchPrices = async () => {
+    if (!hasApiKey) { log("Add your RunPod API key in Settings first."); return; }
+    setFetchingPrices(true);
+    try {
+      const gpuTypes = await listGpuTypes(settings.runpodApiKey);
+      const map: Record<string, { secure: number; community: number }> = {};
+      for (const g of gpuTypes) {
+        map[g.id] = {
+          secure: g.lowestPrice?.uninterruptablePrice ?? 0,
+          community: g.lowestPrice?.minimumBidPrice ?? 0,
+        };
+      }
+      setLivePrices(map);
+    } catch (err) {
+      log(`Price fetch error: ${err}`);
+    }
+    setFetchingPrices(false);
+  };
+
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100%" }}>
       <PageHeader
@@ -201,7 +231,7 @@ export default function RunPodLauncher() {
                 { label: "Character", value: character.name || "—" },
                 { label: "Trigger word", value: character.triggerWord || "—" },
                 { label: "Approved images", value: `${approved.length}` },
-                { label: "Total images", value: `${images.length}` },
+                { label: "Est. training time", value: estimatedTime ?? "—" },
               ].map(({ label, value }) => (
                 <div key={label} style={{ display: "flex", justifyContent: "space-between", marginBottom: "6px" }}>
                   <span style={{ fontFamily: "var(--font-mono)", fontSize: "10px", color: "var(--text-muted)" }}>{label}</span>
@@ -231,26 +261,48 @@ export default function RunPodLauncher() {
 
           {/* GPU selection */}
           <div style={{ marginBottom: "16px" }}>
-            <div className="section-label">GPU</div>
-            {RECOMMENDED_GPUS.map((gpu) => (
-              <div
-                key={gpu.id}
-                onClick={() => setConfig((c) => ({ ...c, gpuTypeId: gpu.id }))}
-                style={{
-                  padding: "8px 10px",
-                  marginTop: "4px",
-                  borderRadius: "5px",
-                  cursor: "pointer",
-                  background: config.gpuTypeId === gpu.id ? "var(--accent-glow)" : "var(--bg-2)",
-                  border: `1px solid ${config.gpuTypeId === gpu.id ? "var(--accent-dim)" : "var(--border)"}`,
-                  transition: "all 0.1s",
-                }}
-              >
-                <div style={{ fontFamily: "var(--font-mono)", fontSize: "11px", color: config.gpuTypeId === gpu.id ? "var(--accent-bright)" : "var(--text-primary)" }}>
-                  {gpu.label}
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: "8px" }}>
+              <div className="section-label" style={{ margin: 0 }}>GPU</div>
+              <button className="btn-ghost" onClick={fetchPrices} disabled={fetchingPrices} style={{ padding: "2px 8px", fontSize: "10px" }}>
+                <RefreshCw size={10} style={{ display: "inline", marginRight: "4px" }} />
+                {fetchingPrices ? "Fetching…" : "Refresh Prices"}
+              </button>
+            </div>
+            {RECOMMENDED_GPUS.map((gpu) => {
+              const price = livePrices?.[gpu.id];
+              const priceStr = price
+                ? config.cloudType === "COMMUNITY"
+                  ? `$${price.community.toFixed(2)}/hr spot`
+                  : `$${price.secure.toFixed(2)}/hr`
+                : null;
+              return (
+                <div
+                  key={gpu.id}
+                  onClick={() => setConfig((c) => ({ ...c, gpuTypeId: gpu.id }))}
+                  style={{
+                    padding: "8px 10px",
+                    marginTop: "4px",
+                    borderRadius: "5px",
+                    cursor: "pointer",
+                    background: config.gpuTypeId === gpu.id ? "var(--accent-glow)" : "var(--bg-2)",
+                    border: `1px solid ${config.gpuTypeId === gpu.id ? "var(--accent-dim)" : "var(--border)"}`,
+                    transition: "all 0.1s",
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "space-between",
+                  }}
+                >
+                  <div style={{ fontFamily: "var(--font-mono)", fontSize: "11px", color: config.gpuTypeId === gpu.id ? "var(--accent-bright)" : "var(--text-primary)" }}>
+                    {gpu.label}
+                  </div>
+                  {priceStr && (
+                    <div style={{ fontFamily: "var(--font-mono)", fontSize: "10px", color: config.gpuTypeId === gpu.id ? "var(--accent-bright)" : "var(--text-muted)", opacity: 0.9 }}>
+                      {priceStr}
+                    </div>
+                  )}
                 </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
 
           {/* Cloud type */}
@@ -286,22 +338,35 @@ export default function RunPodLauncher() {
                 { label: "Steps", key: "steps" as const, type: "number" },
                 { label: "LR", key: "learningRate" as const, type: "text" },
                 { label: "Network Dim", key: "networkDim" as const, type: "number" },
-                { label: "Network Alpha", key: "networkAlpha" as const, type: "number" },
                 { label: "Resolution", key: "resolution" as const, type: "number" },
-              ].map(({ label, key, type }) => (
-                <div key={key}>
-                  <div style={{ fontFamily: "var(--font-mono)", fontSize: "9px", color: "var(--text-muted)", marginBottom: "3px", letterSpacing: "0.06em", textTransform: "uppercase" }}>{label}</div>
-                  <input
-                    type={type}
-                    style={{ width: "100%" }}
-                    value={config[key]}
-                    onChange={(e) => setConfig((c) => ({
-                      ...c,
-                      [key]: type === "number" ? parseInt(e.target.value) || 0 : e.target.value
-                    }))}
-                  />
-                </div>
-              ))}
+              ].map(({ label, key, type }) => {
+                const suggestedSteps = approved.length > 0
+                  ? Math.max(500, Math.min(4000, Math.round(approved.length * 100 / 100) * 100))
+                  : null;
+                return (
+                  <div key={key}>
+                    <div style={{ fontFamily: "var(--font-mono)", fontSize: "9px", color: "var(--text-muted)", marginBottom: "3px", letterSpacing: "0.06em", textTransform: "uppercase" }}>{label}</div>
+                    <input
+                      type={type}
+                      style={{ width: "100%" }}
+                      value={config[key]}
+                      onChange={(e) => setConfig((c) => ({
+                        ...c,
+                        [key]: type === "number" ? parseInt(e.target.value) || 0 : e.target.value
+                      }))}
+                    />
+                    {key === "steps" && suggestedSteps && config.steps !== suggestedSteps && (
+                      <div
+                        onClick={() => setConfig((c) => ({ ...c, steps: suggestedSteps }))}
+                        style={{ marginTop: "3px", fontFamily: "var(--font-mono)", fontSize: "9px", color: "var(--accent-dim)", cursor: "pointer", letterSpacing: "0.04em" }}
+                        title={`${approved.length} images × 100 steps`}
+                      >
+                        → suggest {suggestedSteps}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
             </div>
             <div style={{
               marginTop: "8px",

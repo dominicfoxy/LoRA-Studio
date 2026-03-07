@@ -10,6 +10,7 @@ export default function SettingsPage() {
   const { settings, setSettings } = useStore();
   const [forgeTest, setForgeTest] = useState<TestState>("idle");
   const [runpodTest, setRunpodTest] = useState<TestState>("idle");
+  const [localScale, setLocalScale] = useState(settings.uiScale ?? 1.0);
 
   const testForge = async () => {
     setForgeTest("testing");
@@ -24,15 +25,11 @@ export default function SettingsPage() {
   const testRunpod = async () => {
     setRunpodTest("testing");
     try {
-      const res = await fetch("https://api.runpod.io/graphql", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${settings.runpodApiKey}`,
-        },
-        body: JSON.stringify({ query: "{ myself { id } }" }),
+      const json = await invoke<{ data?: { myself?: { id?: string } } }>("runpod_graphql", {
+        apiKey: settings.runpodApiKey,
+        query: "{ myself { id } }",
+        variables: {},
       });
-      const json = await res.json();
       setRunpodTest(json.data?.myself?.id ? "ok" : "fail");
     } catch {
       setRunpodTest("fail");
@@ -56,6 +53,32 @@ export default function SettingsPage() {
       <PageHeader title="Settings" subtitle="API endpoints, keys, and defaults" />
       <div style={{ flex: 1, overflow: "auto", padding: "28px" }}>
         <div style={{ maxWidth: "560px" }}>
+
+          {/* UI Scale */}
+          <section style={{ marginBottom: "32px" }}>
+            <div style={{ fontFamily: "var(--font-display)", fontSize: "14px", fontWeight: 700, color: "var(--text-primary)", marginBottom: "16px", paddingBottom: "8px", borderBottom: "1px solid var(--border)" }}>
+              Display
+            </div>
+            <div className="section-label">UI Scale</div>
+            <div style={{ display: "flex", alignItems: "center", gap: "16px", marginTop: "8px" }}>
+              <input
+                type="range"
+                min="0.7"
+                max="1.5"
+                step="0.05"
+                value={localScale}
+                onChange={(e) => setLocalScale(parseFloat(e.target.value))}
+                onPointerUp={(e) => setSettings({ uiScale: parseFloat((e.target as HTMLInputElement).value) })}
+                style={{ flex: 1, padding: 0, border: "none", background: "transparent", cursor: "pointer" }}
+              />
+              <span style={{ fontFamily: "var(--font-mono)", fontSize: "13px", color: "var(--accent-bright)", width: "42px", textAlign: "right", flexShrink: 0 }}>
+                {Math.round(localScale * 100)}%
+              </span>
+              <button className="btn-ghost" onClick={() => { setLocalScale(1.0); setSettings({ uiScale: 1.0 }); }} style={{ padding: "4px 10px", fontSize: "11px", flexShrink: 0 }}>
+                Reset
+              </button>
+            </div>
+          </section>
 
           {/* Forge WebUI */}
           <section style={{ marginBottom: "32px" }}>

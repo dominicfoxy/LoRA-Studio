@@ -80,6 +80,13 @@ export async function setModel(baseUrl: string, checkpoint: string): Promise<voi
   });
 }
 
+// Normalize a prompt segment: trim whitespace and leading/trailing commas.
+// Use this on every field before joining into a prompt.
+export function normSeg(s: string | undefined | null): string {
+  if (!s) return "";
+  return s.trim().replace(/^[,\s]+|[,\s]+$/g, "").trim();
+}
+
 export function base64ToBytes(b64: string): Uint8Array {
   const binary = atob(b64);
   const bytes = new Uint8Array(binary.length);
@@ -87,11 +94,14 @@ export function base64ToBytes(b64: string): Uint8Array {
   return bytes;
 }
 
-// Derive booru-style caption from a generation prompt
-// Strips technical tokens, reorders for LoRA training
+// Derive booru-style caption from a generation prompt.
+// Strips character identity tags (species, appearance, artist style) so the
+// LoRA learns those from the trigger word alone.  Retains per-image variable
+// tags: pose, outfit, expression, background, extras.
 export function deriveCaption(
   prompt: string,
-  triggerWord: string
+  triggerWord: string,
+  characterContext?: { species: string; baseDescription: string; artistTags: string }
 ): string {
   // Remove lora syntax: <lora:...>
   let clean = prompt.replace(/<lora:[^>]+>/g, "");
@@ -99,19 +109,30 @@ export function deriveCaption(
   clean = clean.replace(/\(([^:)]+):\d+\.?\d*\)/g, "$1");
   // Remove plain parens used for emphasis: (tag) -> tag
   clean = clean.replace(/\(([^)]+)\)/g, "$1");
-  // Split on commas, clean whitespace
+
+  // Build set of character-identity tags to strip
+  const stripSet = new Set<string>();
+  if (characterContext) {
+    const { species, baseDescription, artistTags } = characterContext;
+    const identityFields = [species, baseDescription, artistTags, artistTags ? `style of ${artistTags}` : ""];
+    for (const field of identityFields) {
+      normSeg(field).split(",").map((t) => t.trim().toLowerCase()).filter(Boolean).forEach((t) => stripSet.add(t));
+    }
+  }
+
+  const QUALITY_TOKENS = /^(masterpiece|best quality|high quality|highres|absurdres|ultra-detailed|8k|4k)$/;
+
   const tags = clean
     .split(",")
     .map((t) => t.trim().toLowerCase())
-    .filter((t) => t.length > 0 && !t.match(/^(masterpiece|best quality|high quality|highres|absurdres|ultra-detailed|8k|4k)$/));
+    .filter((t) => t.length > 0 && !QUALITY_TOKENS.test(t) && !stripSet.has(t));
 
   // Deduplicate
   const unique = [...new Set(tags)];
 
-  // Prepend trigger word
-  if (triggerWord && !unique.includes(triggerWord.toLowerCase())) {
-    unique.unshift(triggerWord.toLowerCase());
-  }
+  // Ensure trigger word is first
+  const withoutTrigger = unique.filter((t) => t !== triggerWord.toLowerCase());
+  if (triggerWord) withoutTrigger.unshift(triggerWord.toLowerCase());
 
-  return unique.join(", ");
+  return withoutTrigger.join(", ");
 }

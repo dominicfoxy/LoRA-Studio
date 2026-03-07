@@ -1,6 +1,6 @@
-import { useState, useCallback, useEffect } from "react";
+import { useState, useCallback, useEffect, useMemo } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { Save, RefreshCw, Filter } from "lucide-react";
+import { Save, RefreshCw, Filter, ChevronDown, ChevronUp } from "lucide-react";
 import PageHeader from "../components/PageHeader";
 import { useStore, GeneratedImage } from "../store";
 
@@ -18,6 +18,8 @@ export default function CaptionEditor() {
   const [filter, setFilter] = useState<FilterMode>("approved");
   const [selected, setSelected] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
+  const [disabledTags, setDisabledTags] = useState<Set<string>>(new Set());
+  const [tagsExpanded, setTagsExpanded] = useState(true);
 
   const filtered = images.filter((img) => {
     if (filter === "approved") return img.approved === true;
@@ -26,6 +28,31 @@ export default function CaptionEditor() {
   });
 
   const selectedImg = images.find((i) => i.id === selected) ?? filtered[0] ?? null;
+
+  // Collect all tags across filtered images, sorted by frequency descending
+  const tagFrequency = useMemo(() => {
+    const freq = new Map<string, number>();
+    for (const img of filtered) {
+      for (const tag of img.caption.split(",").map((t) => t.trim()).filter(Boolean)) {
+        freq.set(tag, (freq.get(tag) ?? 0) + 1);
+      }
+    }
+    return new Map([...freq.entries()].sort((a, b) => b[1] - a[1]));
+  }, [filtered.map((i) => i.caption).join("|")]);
+
+  const toggleTag = (tag: string) => {
+    setDisabledTags((prev) => {
+      const next = new Set(prev);
+      next.has(tag) ? next.delete(tag) : next.add(tag);
+      return next;
+    });
+  };
+
+  const applyDisabled = (caption: string): string => {
+    if (disabledTags.size === 0) return caption;
+    const tags = caption.split(",").map((t) => t.trim()).filter((t) => t && !disabledTags.has(t));
+    return normalizeCaption(tags.join(", "), character.triggerWord);
+  };
 
   const saveCaption = async (img: GeneratedImage, caption: string) => {
     const normalized = normalizeCaption(caption, character.triggerWord);
@@ -41,10 +68,11 @@ export default function CaptionEditor() {
   const saveAllCaptions = async () => {
     setSaving(true);
     for (const img of filtered) {
-      const normalized = normalizeCaption(img.caption, character.triggerWord);
+      const normalized = applyDisabled(img.caption);
       await invoke("save_caption", { imagePath: img.path, caption: normalized });
       updateImage(img.id, { caption: normalized });
     }
+    setDisabledTags(new Set());
     setSaving(false);
   };
 
@@ -95,6 +123,61 @@ export default function CaptionEditor() {
           </button>
         ))}
       </div>
+
+      {/* Dataset Tags panel */}
+      {filtered.length > 0 && (
+        <div style={{ borderBottom: "1px solid var(--border)", flexShrink: 0, background: "var(--bg-1)" }}>
+          <div
+            onClick={() => setTagsExpanded(!tagsExpanded)}
+            style={{ display: "flex", alignItems: "center", gap: "10px", padding: "7px 28px", cursor: "pointer", userSelect: "none" }}
+          >
+            <div style={{ fontFamily: "var(--font-mono)", fontSize: "10px", color: "var(--text-muted)", letterSpacing: "0.1em", textTransform: "uppercase", fontWeight: 700 }}>
+              Dataset Tags
+            </div>
+            <div style={{ fontFamily: "var(--font-mono)", fontSize: "10px", color: "var(--text-muted)" }}>
+              {tagFrequency.size} unique
+            </div>
+            {disabledTags.size > 0 && (
+              <div style={{ fontFamily: "var(--font-mono)", fontSize: "10px", color: "var(--red, #d47070)", background: "var(--red-dim)", border: "1px solid var(--red)", borderRadius: "3px", padding: "1px 8px" }}>
+                {disabledTags.size} tag{disabledTags.size !== 1 ? "s" : ""} will be removed on Save All
+              </div>
+            )}
+            <div style={{ flex: 1 }} />
+            {tagsExpanded ? <ChevronUp size={12} color="var(--text-muted)" /> : <ChevronDown size={12} color="var(--text-muted)" />}
+          </div>
+          {tagsExpanded && (
+            <div style={{ padding: "0 28px 10px", display: "flex", flexWrap: "wrap", gap: "5px", maxHeight: "130px", overflowY: "auto" }}>
+              {[...tagFrequency.entries()].map(([tag, count]) => {
+                const disabled = disabledTags.has(tag);
+                const isTrigger = tag.toLowerCase() === character.triggerWord.toLowerCase();
+                return (
+                  <button
+                    key={tag}
+                    onClick={() => !isTrigger && toggleTag(tag)}
+                    title={`${count} image${count !== 1 ? "s" : ""}${isTrigger ? " (trigger word — cannot remove)" : ""}`}
+                    style={{
+                      display: "inline-flex", alignItems: "center", gap: "5px",
+                      padding: "2px 9px",
+                      borderRadius: "3px",
+                      background: isTrigger ? "var(--accent-glow)" : disabled ? "transparent" : "var(--bg-3)",
+                      border: `1px solid ${isTrigger ? "var(--accent-dim)" : disabled ? "var(--border)" : "var(--border)"}`,
+                      color: isTrigger ? "var(--accent-bright)" : disabled ? "var(--text-muted)" : "var(--text-secondary)",
+                      fontFamily: "var(--font-mono)", fontSize: "10px",
+                      cursor: isTrigger ? "default" : "pointer",
+                      opacity: disabled ? 0.45 : 1,
+                      textDecoration: disabled ? "line-through" : "none",
+                      transition: "all 0.1s",
+                    }}
+                  >
+                    {tag}
+                    <span style={{ fontSize: "9px", opacity: 0.6 }}>{count}</span>
+                  </button>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      )}
 
       <div style={{ flex: 1, display: "flex", overflow: "hidden" }}>
         {/* Left: thumbnail strip */}
