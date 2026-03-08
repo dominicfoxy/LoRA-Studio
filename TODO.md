@@ -96,3 +96,4 @@ mycharacter, wolf girl, long silver hair, style of artist1, {standing, full body
 - [x] **Pipeline flow indicator** — horizontal step indicator at top of RunPod Launcher shows Create pod → Upload dataset → Get checkpoint → Training → Download LoRA → Done; steps advance automatically and turn green on completion.
 - [x] **Optimizer-aware GPU flags** — `gpuTrainingFlags` now takes optimizer as a parameter; Prodigy and DAdaptAdam reduce batch size one tier (e.g. A100 80GB: 4→2) to account for their larger float32 optimizer state footprint.
 - [x] **`PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`** — added to training command to reduce CUDA memory fragmentation.
+- [x] **Trigger word sanitisation hardened** — input now strips all non-`[a-z0-9_]` characters (was: replace spaces with `_` only), preventing accidental shell metacharacters in pod commands.

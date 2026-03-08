@@ -356,7 +356,7 @@ export default function CharacterSetup() {
           </div>
 
           <Field label="Trigger Word" hint="Short, lowercase, uncommon token">
-            <input style={{ width: "100%" }} placeholder="e.g. sablefox_v1" value={character.triggerWord} onChange={(e) => setCharacter({ triggerWord: e.target.value.toLowerCase().replace(/\s+/g, "_") })} />
+            <input style={{ width: "100%" }} placeholder="e.g. sablefox_v1" value={character.triggerWord} onChange={(e) => setCharacter({ triggerWord: e.target.value.toLowerCase().replace(/[^a-z0-9_]/g, "") })} />
           </Field>
 
           <Field label="Species" hint="Used to pre-populate shot list prompts">
