@@ -6,7 +6,7 @@ import PageHeader from "../components/PageHeader";
 import { useStore } from "../store";
 import {
   listGpuTypes, createPod, getPod, terminatePod, listPods,
-  listNetworkVolumes, jupyterFileExists, jupyterUploadFile, jupyterRunCommand, jupyterRunSync,
+  listNetworkVolumes, jupyterUploadFile, jupyterRunCommand,
   RECOMMENDED_GPUS, KOHYA_POD_TEMPLATE, generateKohyaConfig, gpuTrainingFlags,
   Pod, NetworkVolume,
 } from "../lib/runpod";
@@ -321,26 +321,15 @@ export default function RunPodLauncher() {
     const existing = volumeId ? settings.volumeContents?.[volumeId] : null;
 
     try {
-      // Check what's already on the volume
+      // Upload dataset and config to volume
       const zipName = zipPath.split("/").pop()!;
       const configName = "kohya_config.toml";
-      const zipExists = await jupyterFileExists(jUrl, JUPYTER_PASS, zipName);
-      const configExists = await jupyterFileExists(jUrl, JUPYTER_PASS, configName);
-
-      // Warn if overwriting existing dataset
-      if (zipExists && existing) {
-        log(`WARNING: Volume already contains dataset from ${new Date(existing.uploadedAt).toLocaleDateString()} (${existing.datasetKey}). Overwriting.`);
-      }
 
       // Upload dataset zip
-      if (!zipExists || existing?.datasetKey !== datasetKey) {
-        setUploadStatus(`Uploading dataset zip (${zipName})…`);
-        log(`Uploading ${zipName} to volume…`);
-        await jupyterUploadFile(jUrl, JUPYTER_PASS, `workspace/${zipName}`, zipPath);
-        log(`Dataset uploaded.`);
-      } else {
-        log(`Dataset already on volume — skipping upload.`);
-      }
+      setUploadStatus(`Uploading dataset zip (${zipName})…`);
+      log(`Uploading ${zipName} to volume…`);
+      await jupyterUploadFile(jUrl, JUPYTER_PASS, `workspace/${zipName}`, zipPath);
+      log(`Dataset uploaded.`);
 
       // Determine optimal training flags for the selected GPU
       const selectedVram =
@@ -467,7 +456,7 @@ export default function RunPodLauncher() {
   const downloadOutputs = async (jUrl: string) => {
     const JUPYTER_PASS = "lorastudio";
     const char = characterRef.current;
-    const destDir = char.loraDir || char.outputDir;
+    const destDir = char.outputDir || char.loraDir;
     if (!destDir) { log(`Cannot download: no loraDir or outputDir set on character.`); return; }
 
     log(`Training complete — downloading LoRA to ${destDir}…`);

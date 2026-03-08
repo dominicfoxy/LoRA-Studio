@@ -140,7 +140,7 @@ output_dir/
 
 - Training is fully automated — no manual Jupyter interaction required
 - A **Network Volume** caches the base model between runs, avoiding repeated 6GB+ downloads. Volumes are datacenter-specific; if your chosen GPU isn't available in the volume's datacenter, the app will launch without the volume and download fresh automatically
-- The finished LoRA downloads to your character's `loraDir` when training completes
+- The finished LoRA downloads to your character's output directory when training completes
 - **Terminate the pod** after training to stop billing — auto-terminate on download is planned
 
 ## Architecture

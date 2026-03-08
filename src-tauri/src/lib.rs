@@ -167,14 +167,6 @@ async fn read_image_b64(path: String) -> Result<String, String> {
 }
 
 #[tauri::command]
-async fn read_file_b64(path: String) -> Result<String, String> {
-    let mut file = fs::File::open(&path).map_err(|e| e.to_string())?;
-    let mut buf = Vec::new();
-    file.read_to_end(&mut buf).map_err(|e| e.to_string())?;
-    Ok(general_purpose::STANDARD.encode(&buf))
-}
-
-#[tauri::command]
 async fn list_images_in_dir(dir: String) -> Result<Vec<String>, String> {
     let path = Path::new(&dir);
     if !path.exists() {
@@ -441,11 +433,6 @@ async fn jupyter_run_command(jupyter_url: String, password: String, command: Str
     jupyter_terminal_send(&jupyter_url, &password, &command, None).await
 }
 
-// Like jupyter_run_command but waits until the output contains `done_marker` (or times out after `timeout_secs`)
-#[tauri::command]
-async fn jupyter_run_sync(jupyter_url: String, password: String, command: String, timeout_secs: u64) -> Result<(), String> {
-    jupyter_terminal_send(&jupyter_url, &password, &command, Some(timeout_secs)).await
-}
 
 async fn jupyter_terminal_send(jupyter_url: &str, password: &str, command: &str, wait_secs: Option<u64>) -> Result<(), String> {
     use tokio_tungstenite::tungstenite::Message;
@@ -614,14 +601,12 @@ pub fn run() {
             load_project,
             ensure_dir,
             path_exists,
-            read_file_b64,
             list_lora_files,
             close_app,
             runpod_graphql,
             jupyter_is_ready,
             jupyter_upload_file,
             jupyter_run_command,
-            jupyter_run_sync,
             jupyter_read_file,
             jupyter_download_file,
         ])

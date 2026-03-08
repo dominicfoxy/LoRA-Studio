@@ -214,11 +214,6 @@ export const KOHYA_POD_TEMPLATE = {
 // ── Jupyter API helpers ────────────────────────────────────────────────────────
 // All Jupyter requests go through Rust/invoke to avoid CORS issues in the webview
 
-export async function jupyterFileExists(jupyterUrl: string, _password: string, _remotePath: string): Promise<boolean> {
-  // Simplified check — just return false to always attempt upload
-  // Full existence check via Rust not yet implemented
-  return false;
-}
 
 export async function jupyterUploadFile(jupyterUrl: string, password: string, remotePath: string, localPath: string): Promise<void> {
   await invoke("jupyter_upload_file", { jupyterUrl, password, remotePath, localPath });
@@ -228,9 +223,6 @@ export async function jupyterRunCommand(jupyterUrl: string, password: string, co
   await invoke("jupyter_run_command", { jupyterUrl, password, command });
 }
 
-export async function jupyterRunSync(jupyterUrl: string, password: string, command: string, timeoutSecs: number): Promise<void> {
-  await invoke("jupyter_run_sync", { jupyterUrl, password, command, timeoutSecs });
-}
 
 // Generates ONLY the dataset config TOML passed via --dataset_config.
 // Training hyperparameters (optimizer, network, steps, etc.) are passed as CLI
