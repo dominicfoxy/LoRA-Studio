@@ -549,6 +549,27 @@ async fn jupyter_terminal_send(jupyter_url: &str, password: &str, command: &str,
 }
 
 #[tauri::command]
+async fn jupyter_download_file(jupyter_url: String, password: String, remote_path: String, local_path: String) -> Result<(), String> {
+    let (client, _xsrf, cookie_header) = jupyter_client_login(&jupyter_url, &password).await?;
+    let url = format!("{}/api/contents/{}?content=1&format=base64&type=file", jupyter_url, remote_path);
+    let res = client.get(&url)
+        .header("Cookie", &cookie_header)
+        .send().await
+        .map_err(|e| e.to_string())?;
+    if !res.status().is_success() {
+        return Err(format!("download failed ({})", res.status()));
+    }
+    let json: serde_json::Value = res.json().await.map_err(|e| e.to_string())?;
+    let b64 = json["content"].as_str().ok_or("missing content field")?;
+    let bytes = general_purpose::STANDARD.decode(b64).map_err(|e| e.to_string())?;
+    if let Some(parent) = std::path::Path::new(&local_path).parent() {
+        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    fs::write(&local_path, &bytes).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
 async fn jupyter_read_file(jupyter_url: String, password: String, remote_path: String) -> Result<String, String> {
     let (client, _xsrf, cookie_header) = jupyter_client_login(&jupyter_url, &password).await?;
     let url = format!("{}/api/contents/{}?content=1&format=text&type=file", jupyter_url, remote_path);
@@ -602,6 +623,7 @@ pub fn run() {
             jupyter_run_command,
             jupyter_run_sync,
             jupyter_read_file,
+            jupyter_download_file,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

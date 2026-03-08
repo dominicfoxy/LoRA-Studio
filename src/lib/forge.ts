@@ -94,6 +94,57 @@ export function base64ToBytes(b64: string): Uint8Array {
   return bytes;
 }
 
+// Build a Dynamic Prompts compatible block from the current shot list config.
+// Syntax: {v1|v2|v3} picks one at random per image; single variants emit as plain text.
+export function buildDynamicPromptsBlock(
+  character: { triggerWord: string; species: string; baseDescription: string; artistTags: string },
+  generation: {
+    poses: { prompt: string }[];
+    outfits: { prompt: string; triggerWord?: string }[];
+    expressions: string[];
+    backgrounds: string[];
+    extras: string;
+  }
+): string {
+  const prefixParts = [
+    character.triggerWord,
+    character.species,
+    character.baseDescription,
+    character.artistTags ? `style of ${character.artistTags}` : "",
+  ].map(normSeg).filter((s) => s.length > 0);
+
+  function buildGroup(variants: string[]): string {
+    const filtered = variants.map(normSeg).filter((s) => s.length > 0);
+    if (filtered.length === 0) return "";
+    if (filtered.length === 1) return filtered[0];
+    return `{${filtered.join("|")}}`;
+  }
+
+  const poseGroup = buildGroup(generation.poses.map((p) => p.prompt));
+  const expressionGroup = buildGroup(generation.expressions);
+
+  // Outfits: prepend per-entry triggerWord inside the group if set
+  const outfitVariants = generation.outfits
+    .map((o) => [o.triggerWord, o.prompt].map(normSeg).filter((s) => s.length > 0).join(", "))
+    .filter((s) => s.length > 0);
+  const outfitGroup =
+    outfitVariants.length === 0 ? "" :
+    outfitVariants.length === 1 ? outfitVariants[0] :
+    `{${outfitVariants.join("|")}}`;
+
+  const backgroundGroup = buildGroup(generation.backgrounds);
+  const extras = normSeg(generation.extras);
+
+  return [
+    ...prefixParts,
+    poseGroup,
+    expressionGroup,
+    outfitGroup,
+    backgroundGroup,
+    extras,
+  ].filter((s) => s && s.trim().length > 0).join(", ");
+}
+
 // Derive booru-style caption from a generation prompt.
 // Strips character identity tags (species, appearance, artist style) so the
 // LoRA learns those from the trigger word alone.  Retains per-image variable

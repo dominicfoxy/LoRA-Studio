@@ -21,13 +21,22 @@
 ### UX Pattern: Live Status Mirror
 - [ ] Anywhere there's a log panel monitoring an ongoing process, show a persistent "currently doing X" status line above the log (see `uploadStatus` in RunPodLauncher — updates to reflect current step with elapsed time e.g. `Extracting dataset… (10s)`). Candidates: Batch Generator progress label, Caption Editor save-all feedback.
 
+### RunPod Launcher — Status Feedback Gaps
+`uploadStatus` is the right pattern but only covers part of the timeline. Apply it consistently:
+- [ ] **Packaging**: Start elapsed-time ticker when zip starts (`setPhase("packaging")`), show in `uploadStatus`
+- [ ] **Zip upload / model local upload**: Elapsed-time ticker (Jupyter API doesn't expose byte progress)
+- [ ] **Pod startup wait**: Set `uploadStatus` with elapsed time in the pod-polling loop (currently only logged)
+- [ ] **Jupyter readiness wait**: Same — elapsed time in `uploadStatus` while waiting for `/api/terminals`
+- [ ] **Model download on pod**: After firing nohup, keep a time ticker running ("Downloading model on pod… (2m 30s) — check Jupyter for progress")
+- [ ] **Training**: Parse step info from Kohya log lines and mirror into `uploadStatus` as a persistent "Training: step 450/2000 (22%)" line above the log
+
 ### General
 - [ ] Character preset gallery — save and reload full character configs (separate from project save), useful for switching between characters quickly
 - [ ] **Fox's Automatic Braindead Character Describer (ABCD)** — AI-assisted tool to auto-generate the core description, artist tags, and trigger word from a reference image or text prompt
 
 ---
 
-## Planned Tool: Dynamic Prompts Export
+## ~~Planned Tool: Dynamic Prompts Export~~ ✓ Done
 
 **Goal:** Convert the current shot list into a [Dynamic Prompts](https://github.com/adieyal/sd-dynamic-prompts) compatible block that can be copied and pasted directly into Forge's positive prompt field — no API required.
 

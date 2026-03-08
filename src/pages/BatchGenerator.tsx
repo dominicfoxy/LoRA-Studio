@@ -181,12 +181,10 @@ const liveQueueRef = { current: null as Array<{ prompt: string; shotId: string; 
 
 // ── Main Component ────────────────────────────────────────────────────────────
 export default function BatchGenerator() {
-  const { character, generation, images, addImage, updateImage, removeImage, clearImages, settings, generationRunning, setGenerationRunning, generationProgress, setGenerationProgress, generationCurrentJob, setGenerationCurrentJob } = useStore();
+  const { character, generation, updateGeneration, images, addImage, updateImage, removeImage, clearImages, settings, generationRunning, setGenerationRunning, generationProgress, setGenerationProgress, generationCurrentJob, setGenerationCurrentJob } = useStore();
   const [lastError, setLastError] = useState("");
   const [lightboxB64, setLightboxB64] = useState<string | null>(null);
   const [thumbSize, setThumbSize] = useState(220);
-  const [genMode, setGenMode] = useState<"all" | "random">("all");
-  const [randomN, setRandomN] = useState(10);
   const [confirmPurge, setConfirmPurge] = useState(false);
   const [confirmGenerate, setConfirmGenerate] = useState(false);
   const [approvedExpanded, setApprovedExpanded] = useState(false);
@@ -274,12 +272,12 @@ export default function BatchGenerator() {
       )
     );
 
-    if (genMode === "random" && combos.length > randomN) {
+    if (generation.genMode === "random" && combos.length > generation.randomCount) {
       for (let i = combos.length - 1; i > 0; i--) {
         const j = Math.floor(Math.random() * (i + 1));
         [combos[i], combos[j]] = [combos[j], combos[i]];
       }
-      combos = combos.slice(0, randomN);
+      combos = combos.slice(0, generation.randomCount);
     }
 
     const queue = combos.flatMap(([pose, outfit, expression, background]) =>
@@ -365,11 +363,11 @@ export default function BatchGenerator() {
             {/* Generation mode */}
             <div style={{ display: "flex", alignItems: "center", gap: "4px" }}>
               {(["all", "random"] as const).map((m) => (
-                <button key={m} onClick={() => setGenMode(m)} style={{
+                <button key={m} onClick={() => updateGeneration({ genMode: m })} style={{
                   padding: "4px 10px", fontSize: "10px",
-                  background: genMode === m ? "var(--accent-glow)" : "var(--bg-3)",
-                  border: `1px solid ${genMode === m ? "var(--accent-dim)" : "var(--border)"}`,
-                  color: genMode === m ? "var(--accent-bright)" : "var(--text-muted)",
+                  background: generation.genMode === m ? "var(--accent-glow)" : "var(--bg-3)",
+                  border: `1px solid ${generation.genMode === m ? "var(--accent-dim)" : "var(--border)"}`,
+                  color: generation.genMode === m ? "var(--accent-bright)" : "var(--text-muted)",
                   borderRadius: "3px", cursor: "pointer",
                   fontFamily: "var(--font-display)", fontWeight: 600,
                   letterSpacing: "0.05em", textTransform: "uppercase",
@@ -377,10 +375,10 @@ export default function BatchGenerator() {
                   {m === "all" ? "All Combos" : "Random"}
                 </button>
               ))}
-              {genMode === "random" && (
+              {generation.genMode === "random" && (
                 <input
-                  type="number" min={1} max={999} value={randomN}
-                  onChange={(e) => setRandomN(Math.max(1, parseInt(e.target.value) || 10))}
+                  type="number" min={1} max={999} value={generation.randomCount}
+                  onChange={(e) => updateGeneration({ randomCount: Math.max(1, parseInt(e.target.value) || 10) })}
                   style={{ width: "52px", padding: "4px 6px", fontSize: "11px", textAlign: "center" }}
                   title="Max combinations per shot"
                 />

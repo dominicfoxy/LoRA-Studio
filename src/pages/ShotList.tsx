@@ -3,7 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { Plus, Trash2, ChevronDown, ChevronUp, Layers } from "lucide-react";
 import PageHeader from "../components/PageHeader";
 import { useStore, OutfitEntry, PoseEntry } from "../store";
-import { normSeg } from "../lib/forge";
+import { normSeg, buildDynamicPromptsBlock } from "../lib/forge";
 
 const POSE_PRESETS = [
   "standing, full body", "sitting", "kneeling", "lying down", "crouching",
@@ -742,9 +742,81 @@ function PoseCategoryPanel({
   );
 }
 
+// ── Dynamic Prompts Panel ──────────────────────────────────────────────────────
+function DynamicPromptsPanel({
+  character,
+  generation,
+}: {
+  character: Parameters<typeof buildDynamicPromptsBlock>[0];
+  generation: Parameters<typeof buildDynamicPromptsBlock>[1];
+}) {
+  const [open, setOpen] = useState(false);
+  const [copied, setCopied] = useState(false);
+
+  const block = buildDynamicPromptsBlock(character, generation);
+
+  const copy = () => {
+    navigator.clipboard.writeText(block).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    });
+  };
+
+  return (
+    <div style={{ border: "1px solid var(--border)", borderRadius: "8px", marginTop: "12px", overflow: "hidden" }}>
+      <div
+        onClick={() => setOpen(!open)}
+        style={{ display: "flex", alignItems: "center", gap: "10px", padding: "10px 16px", cursor: "pointer", background: "var(--bg-3)", userSelect: "none" }}
+      >
+        <div style={{ fontFamily: "var(--font-mono)", fontSize: "10px", color: "var(--text-muted)", textTransform: "uppercase", letterSpacing: "0.12em", fontWeight: 700 }}>
+          Dynamic Prompts Export
+        </div>
+        <div style={{ flex: 1 }} />
+        {open ? <ChevronUp size={13} color="var(--text-muted)" /> : <ChevronDown size={13} color="var(--text-muted)" />}
+      </div>
+
+      {open && (
+        <div style={{ padding: "12px 16px" }}>
+          <textarea
+            readOnly
+            value={block || "(add variants above to generate a block)"}
+            style={{
+              width: "100%", height: "80px", resize: "vertical",
+              fontFamily: "var(--font-mono)", fontSize: "11px",
+              color: block ? "var(--accent-bright)" : "var(--text-muted)",
+              background: "var(--bg-1)", border: "1px solid var(--border)",
+              borderRadius: "4px", padding: "8px", lineHeight: 1.6,
+              boxSizing: "border-box",
+            }}
+          />
+          <div style={{ display: "flex", alignItems: "center", gap: "12px", marginTop: "8px" }}>
+            <button
+              onClick={copy}
+              disabled={!block}
+              style={{
+                padding: "5px 14px", fontSize: "10px",
+                background: copied ? "var(--accent-glow)" : "var(--bg-3)",
+                border: `1px solid ${copied ? "var(--accent-dim)" : "var(--border)"}`,
+                color: copied ? "var(--accent-bright)" : "var(--text-muted)",
+                borderRadius: "4px", cursor: block ? "pointer" : "default",
+                fontFamily: "var(--font-mono)", letterSpacing: "0.05em",
+              }}
+            >
+              {copied ? "Copied!" : "Copy"}
+            </button>
+            <span style={{ fontFamily: "var(--font-mono)", fontSize: "10px", color: "var(--text-muted)" }}>
+              Picks one random combination per image — not the full cartesian product
+            </span>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ── Page ───────────────────────────────────────────────────────────────────────
 export default function ShotList() {
-  const { generation, updateGeneration, character, images, updateImage } = useStore();
+  const { generation, updateGeneration, character, images, updateImage, projectLoadCount } = useStore();
   const [loraFiles, setLoraFiles] = useState<{ name: string; path: string; dir: string }[]>([]);
 
   // Track committed outfit trigger words to detect changes
@@ -752,6 +824,11 @@ export default function ShotList() {
     generation.outfits.map((o) => o.triggerWord)
   );
   const [updatingCaptions, setUpdatingCaptions] = useState(false);
+
+  // Reset baseline whenever a project is loaded — avoids false-positive banner
+  useEffect(() => {
+    setCommittedOutfitTriggers(generation.outfits.map((o) => o.triggerWord));
+  }, [projectLoadCount]);
 
   const outfitTriggerChanges = generation.outfits.reduce<{ oldTrigger: string; newTrigger: string }[]>((acc, outfit, i) => {
     const old = committedOutfitTriggers[i];
@@ -889,6 +966,8 @@ export default function ShotList() {
             {previewPrompt || <span style={{ color: "var(--text-muted)" }}>Add variants above to see a preview…</span>}
           </div>
         </div>
+
+        <DynamicPromptsPanel character={character} generation={generation} />
       </div>
     </div>
   );

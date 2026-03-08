@@ -28,6 +28,8 @@ export interface GenerationConfig {
   cfgScale: number;
   samplerName: string;
   scheduler: string;
+  genMode: "all" | "random";
+  randomCount: number;
 }
 
 export interface GeneratedImage {
@@ -74,6 +76,8 @@ export interface TrainingConfig {
   networkVolumeId: string;
   baseModelLocalPath: string;
   baseModelDownloadUrl: string;
+  containerDiskInGb: number;
+  sdxl: boolean;
 }
 
 export interface AppSettings {
@@ -114,6 +118,12 @@ export interface ProjectState {
   clearRunpodLogs: () => void;
   isDirty: boolean;
   markSaved: () => void;
+  projectLoadCount: number;
+  // Active RunPod session — in-memory only (not persisted), survives page navigation
+  runpodActivePodId: string;
+  runpodActiveJupyterUrl: string;
+  setRunpodActivePodId: (id: string) => void;
+  setRunpodActiveJupyterUrl: (url: string) => void;
 }
 
 const defaultCharacter: CharacterConfig = {
@@ -130,13 +140,15 @@ const defaultCharacter: CharacterConfig = {
 const defaultTraining: TrainingConfig = {
   gpuTypeId: "NVIDIA A100-SXM4-40GB",
   cloudType: "SECURE",
-  steps: 2000,
+  steps: 1500,
   learningRate: "1e-4",
-  networkDim: 32,
+  networkDim: 64,
   resolution: 1024,
   networkVolumeId: "",
   baseModelLocalPath: "",
   baseModelDownloadUrl: "",
+  containerDiskInGb: 40,
+  sdxl: true,
 };
 
 const defaultSettings: AppSettings = {
@@ -166,6 +178,8 @@ const defaultGeneration: GenerationConfig = {
   cfgScale: 7,
   samplerName: "DPM++ 2M Karras",
   scheduler: "Karras",
+  genMode: "all",
+  randomCount: 10,
 };
 
 export const useStore = create<ProjectState>()(
@@ -176,6 +190,7 @@ export const useStore = create<ProjectState>()(
       training: defaultTraining,
       images: [],
       settings: defaultSettings,
+      projectLoadCount: 0,
       generationRunning: false,
       generationProgress: { current: 0, total: 0 },
       generationCurrentJob: "",
@@ -192,6 +207,10 @@ export const useStore = create<ProjectState>()(
       addRunpodLog: (msg) => set((s) => ({ runpodLogs: [...s.runpodLogs, msg] })),
       clearRunpodLogs: () => set({ runpodLogs: [] }),
       markSaved: () => set({ isDirty: false }),
+      runpodActivePodId: "",
+      runpodActiveJupyterUrl: "",
+      setRunpodActivePodId: (id) => set({ runpodActivePodId: id }),
+      setRunpodActiveJupyterUrl: (url) => set({ runpodActiveJupyterUrl: url }),
 
       addImage: (img) => set((s) => ({ images: [...s.images, img] })),
       updateImage: (id, patch) =>
@@ -206,11 +225,12 @@ export const useStore = create<ProjectState>()(
           images: data.images ?? s.images,
           settings: data.settings ?? s.settings,
           isDirty: false,
+          projectLoadCount: s.projectLoadCount + 1,
         })),
     }),
     {
       name: "lora-studio-state",
-      version: 9,
+      version: 13,
       migrate: (persistedState: unknown, version: number) => {
         const state = persistedState as any;
         // v0: flat string fields on shot items
@@ -303,9 +323,33 @@ export const useStore = create<ProjectState>()(
           delete training.dockerImage;
           state.training = { ...defaultTraining, ...training };
         }
+        // v9→10: add containerDiskInGb to training
+        if (version === 9) {
+          state.training = { ...defaultTraining, ...state.training, containerDiskInGb: defaultTraining.containerDiskInGb };
+        }
         // ensure dockerImage always present regardless of migration path
         if (!state.settings?.dockerImage) {
           state.settings = { ...defaultSettings, ...state.settings, dockerImage: defaultSettings.dockerImage };
+        }
+        // v10→11: add genMode/randomCount to generation
+        if (version === 10) {
+          state.generation = { ...defaultGeneration, ...state.generation, genMode: "all", randomCount: 10 };
+        }
+        // v11→12: add sdxl flag to training
+        if (version === 11) {
+          state.training = { ...defaultTraining, ...state.training, sdxl: true };
+        }
+        // v12→13: bump default steps 2000→1500, networkDim 32→64, drop xformers (handled in training command)
+        if (version === 12) {
+          state.training = { ...defaultTraining, ...state.training, steps: 1500, networkDim: 64 };
+        }
+        // ensure containerDiskInGb always present regardless of migration path
+        if (!state.training?.containerDiskInGb) {
+          state.training = { ...defaultTraining, ...state.training, containerDiskInGb: defaultTraining.containerDiskInGb };
+        }
+        // ensure sdxl always present regardless of migration path
+        if (state.training?.sdxl === undefined) {
+          state.training = { ...defaultTraining, ...state.training, sdxl: true };
         }
         return state;
       },

@@ -7,7 +7,7 @@ import { useStore } from "../store";
 import {
   listGpuTypes, createPod, getPod, terminatePod, listPods,
   listNetworkVolumes, jupyterFileExists, jupyterUploadFile, jupyterRunCommand, jupyterRunSync,
-  RECOMMENDED_GPUS, KOHYA_POD_TEMPLATE, generateKohyaConfig,
+  RECOMMENDED_GPUS, KOHYA_POD_TEMPLATE, generateKohyaConfig, gpuTrainingFlags,
   Pod, NetworkVolume,
 } from "../lib/runpod";
 
@@ -22,15 +22,17 @@ interface SearchResult {
 type Phase = "config" | "packaging" | "uploading" | "training" | "done";
 
 export default function RunPodLauncher() {
-  const { character, images, settings, setSettings, training: config, updateTraining: setConfig, runpodLogs: logs, addRunpodLog, clearRunpodLogs } = useStore();
-  const [phase, setPhase] = useState<Phase>("config");
-  const [pod, setPod] = useState<Pod | null>(null);
+  const { character, images, settings, setSettings, training: config, updateTraining: setConfig, runpodLogs: logs, addRunpodLog, clearRunpodLogs, runpodActivePodId, runpodActiveJupyterUrl, setRunpodActivePodId, setRunpodActiveJupyterUrl } = useStore();
+  const [phase, setPhase] = useState<Phase>(runpodActivePodId ? "training" : "config");
+  const [pod, setPodLocal] = useState<Pod | null>(null);
+  const setPod = (p: Pod | null) => { setPodLocal(p); setRunpodActivePodId(p?.id ?? ""); };
   const [zipPath, setZipPath] = useState("");
   const [existingZip, setExistingZip] = useState(false);
   const [activePods, setActivePods] = useState<Pod[]>([]);
   const [polling, setPolling] = useState(false);
   const [confirmLowImages, setConfirmLowImages] = useState(false);
-  const [jupyterUrl, setJupyterUrl] = useState<string | null>(null);
+  const [jupyterUrl, setJupyterUrlLocal] = useState<string | null>(runpodActiveJupyterUrl || null);
+  const setJupyterUrl = (url: string | null) => { setJupyterUrlLocal(url); setRunpodActiveJupyterUrl(url ?? ""); };
   const [livePrices, setLivePrices] = useState<Record<string, { secure: number; community: number }> | null>(null);
   const [liveGpuTypes, setLiveGpuTypes] = useState<Array<{ id: string; displayName: string; memoryInGb: number; secureCloud: boolean; communityCloud: boolean }> | null>(null);
   const [fetchingPrices, setFetchingPrices] = useState(false);
@@ -45,6 +47,16 @@ export default function RunPodLauncher() {
   const [logCopied, setLogCopied] = useState(false);
   const [autoScroll, setAutoScroll] = useState(true);
   const logScrollRef = useRef<HTMLDivElement>(null);
+  // GPU IDs available in the selected volume's specific datacenter (for cache-hit detection)
+  const [dcGpuIds, setDcGpuIds] = useState<Set<string>>(new Set());
+  // Effective volume ID for the current training run (null when GPU is outside volume's DC)
+  const effectiveVolumeIdRef = useRef<string | null>(null);
+  const [downloadIntermediates, setDownloadIntermediates] = useState(false);
+  const downloadIntermediatesRef = useRef(false);
+  useEffect(() => { downloadIntermediatesRef.current = downloadIntermediates; }, [downloadIntermediates]);
+  // Non-stale character ref for use inside polling intervals
+  const characterRef = useRef(character);
+  useEffect(() => { characterRef.current = character; }, [character]);
 
   const approved = images.filter((i) => i.approved === true);
 
@@ -86,6 +98,38 @@ export default function RunPodLauncher() {
     refreshPods();
   }, [hasApiKey]);
 
+  // Reconnect to an active pod if we navigated away and came back
+  useEffect(() => {
+    if (!runpodActivePodId || !hasApiKey) return;
+    getPod(settings.runpodApiKey, runpodActivePodId).then((p) => {
+      setPodLocal(p);
+      setPhase("training");
+      // Restart pod status polling
+      startPolling(runpodActivePodId);
+      // If Jupyter was already ready, restart log polling from end of already-seen lines
+      if (runpodActiveJupyterUrl) {
+        jupyterUrlRef.current = runpodActiveJupyterUrl;
+        setJupyterUrlLocal(runpodActiveJupyterUrl);
+        log(`Reconnected to pod ${runpodActivePodId} — resuming log tail…`);
+        // Read current line count first so we don't re-log already-seen output
+        invoke<string>("jupyter_read_file", {
+          jupyterUrl: runpodActiveJupyterUrl,
+          password: "lorastudio",
+          remotePath: "workspace/training.log",
+        }).then((content) => {
+          startLogPolling(runpodActiveJupyterUrl, content.split("\n").length);
+        }).catch(() => {
+          startLogPolling(runpodActiveJupyterUrl, 0);
+        });
+      }
+    }).catch(() => {
+      // Pod no longer exists — clear stored state
+      setRunpodActivePodId("");
+      setRunpodActiveJupyterUrl("");
+      setPhase("config");
+    });
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps — intentionally runs once on mount
+
   const fetchVolumes = async () => {
     setFetchingVolumes(true);
     try {
@@ -101,17 +145,47 @@ export default function RunPodLauncher() {
     setFetchingVolumes(false);
   };
 
+  // Infer stepsPerSec for any GPU by VRAM tier (used for both estimatedTime and bestValueGpu)
+  const stepsPerSecForGpu = (gpuId: string): number | null => {
+    const known = RECOMMENDED_GPUS.find((g) => g.id === gpuId);
+    if (known) return known.stepsPerSec;
+    const live = liveGpuTypes?.find((g) => g.id === gpuId);
+    if (!live) return null;
+    return live.memoryInGb >= 80 ? 3.2 : live.memoryInGb >= 40 ? 2.0 : live.memoryInGb >= 24 ? 1.0 : 0.6;
+  };
+
+  const resFactor = Math.pow(1024 / config.resolution, 1.5);
+
   const estimatedTime = (() => {
-    const gpu = RECOMMENDED_GPUS.find((g) => g.id === config.gpuTypeId) ??
-      (() => { const live = liveGpuTypes?.find((g) => g.id === config.gpuTypeId); return live ? { stepsPerSec: live.memoryInGb >= 80 ? 3.2 : live.memoryInGb >= 40 ? 2.0 : live.memoryInGb >= 24 ? 1.0 : 0.6 } : null; })();
-    if (!gpu) return null;
-    // Resolution scaling: throughput roughly proportional to (1024/res)^1.5
-    const resFactor = Math.pow(1024 / config.resolution, 1.5);
-    const sps = gpu.stepsPerSec * resFactor;
-    const seconds = config.steps / sps;
+    const sps = stepsPerSecForGpu(config.gpuTypeId);
+    if (!sps) return null;
+    const seconds = config.steps / (sps * resFactor);
     if (seconds < 60) return `~${Math.round(seconds)}s`;
     if (seconds < 3600) return `~${Math.round(seconds / 60)}min`;
     return `~${(seconds / 3600).toFixed(1)}hr`;
+  })();
+
+  // Best-value GPU: lowest estimated total cost = (training + 20min padding) × price/hr
+  // Only computed once live prices are available; excludes GPUs with no current price (unavailable).
+  const bestValueGpuId = (() => {
+    if (!livePrices || !liveGpuTypes) return null;
+    const PADDING_HOURS = 20 / 60;
+    const gpuList = liveGpuTypes.filter((g) =>
+      config.cloudType === "COMMUNITY" ? g.communityCloud : g.secureCloud
+    );
+    let best: { id: string; cost: number } | null = null;
+    for (const g of gpuList) {
+      const price = config.cloudType === "COMMUNITY"
+        ? (livePrices[g.id]?.community ?? 0)
+        : (livePrices[g.id]?.secure ?? 0);
+      if (price <= 0) continue; // not available right now
+      const sps = stepsPerSecForGpu(g.id);
+      if (!sps) continue;
+      const trainingHours = config.steps / (sps * resFactor) / 3600;
+      const totalCost = (trainingHours + PADDING_HOURS) * price;
+      if (!best || totalCost < best.cost) best = { id: g.id, cost: totalCost };
+    }
+    return best;
   })();
 
   const logFilePath = character.outputDir ? `${character.outputDir}/runpod.log` : null;
@@ -142,15 +216,10 @@ export default function RunPodLauncher() {
       setExistingZip(true);
       log(`Dataset zipped → ${zipOut}`);
 
-      // Generate Kohya config
+      // Generate Kohya dataset config (dataset sections only — training params go via CLI)
       const kohyaConf = generateKohyaConfig({
         triggerWord: character.triggerWord,
         datasetDir: `/workspace/dataset`,
-        outputDir: `/workspace/output`,
-        baseModel: `/workspace/models/${character.baseModel || "model.safetensors"}`,
-        steps: config.steps,
-        learningRate: config.learningRate,
-        networkDim: config.networkDim,
         resolution: config.resolution,
       });
 
@@ -172,18 +241,29 @@ export default function RunPodLauncher() {
     log("Launching RunPod pod...");
 
     try {
-      const hasVolume = !!config.networkVolumeId;
       const selectedVol = networkVolumes.find((v) => v.id === config.networkVolumeId);
-      const dataCenterId = selectedVol?.dataCenterId ?? undefined;
+      // Only attach the volume if the selected GPU type is available in the volume's DC.
+      // If dcGpuIds is empty (no volume selected or prices not fetched), fall through to no-volume mode.
+      const gpuInVolumesDc = !!config.networkVolumeId && dcGpuIds.has(config.gpuTypeId);
+      const useVolume = gpuInVolumesDc;
+      const dataCenterId = useVolume ? selectedVol?.dataCenterId : undefined;
+      effectiveVolumeIdRef.current = useVolume ? config.networkVolumeId : null;
+
+      if (config.networkVolumeId && !useVolume) {
+        log(`Note: Selected GPU is not available in volume's datacenter (${selectedVol?.dataCenterId}). Launching without volume — model will download fresh.`);
+      }
+
       const podSpec = {
         name: `lora-${character.triggerWord}-${Date.now()}`,
         ...KOHYA_POD_TEMPLATE,
         imageName: settings.dockerImage || "ashleykza/kohya:latest",
         gpuTypeId: config.gpuTypeId,
         cloudType: config.cloudType,
-        containerDiskInGb: 20,
-        volumeInGb: hasVolume ? 30 : 0,
-        ...(hasVolume ? { networkVolumeId: config.networkVolumeId } : { volumeMountPath: undefined }),
+        containerDiskInGb: config.containerDiskInGb,
+        // With a network volume: /workspace is the network volume, local vol only needs a few GB for temp
+        // Without: /workspace must hold the model (4-8GB+), dataset, and output — use 50GB
+        volumeInGb: useVolume ? 5 : 50,
+        ...(useVolume ? { networkVolumeId: config.networkVolumeId } : { volumeMountPath: undefined }),
         ...(dataCenterId ? { dataCenterId } : {}),
         env: [
           { key: "JUPYTER_PASSWORD", value: "lorastudio" },
@@ -235,7 +315,8 @@ export default function RunPodLauncher() {
   const uploadToVolume = async (jUrl: string) => {
     if (!zipPath) return;
     const JUPYTER_PASS = "lorastudio";
-    const volumeId = config.networkVolumeId;
+    // Use the effective volume ID determined at launch time (null if GPU was outside volume's DC)
+    const volumeId = effectiveVolumeIdRef.current;
     const datasetKey = `${character.triggerWord}_${Date.now()}`;
     const existing = volumeId ? settings.volumeContents?.[volumeId] : null;
 
@@ -261,15 +342,32 @@ export default function RunPodLauncher() {
         log(`Dataset already on volume — skipping upload.`);
       }
 
-      // Upload kohya config (always refresh — it may have changed)
-      const configPath = `${character.outputDir}/kohya_config.toml`;
-      const configExists2 = await invoke<boolean>("path_exists", { path: configPath });
-      if (configExists2) {
-        setUploadStatus(`Uploading kohya_config.toml…`);
-        log(`Uploading kohya_config.toml…`);
-        await jupyterUploadFile(jUrl, JUPYTER_PASS, `workspace/${configName}`, configPath);
-        log(`Config uploaded.`);
+      // Determine optimal training flags for the selected GPU
+      const selectedVram =
+        RECOMMENDED_GPUS.find(g => g.id === config.gpuTypeId)?.vram ??
+        liveGpuTypes?.find(g => g.id === config.gpuTypeId)?.memoryInGb ??
+        0;
+      const gpuFlags = gpuTrainingFlags(selectedVram);
+      if (selectedVram > 0) {
+        log(`GPU: ${config.gpuTypeId} (${selectedVram}GB VRAM) → batch=${gpuFlags.batchSize}, grad_ckpt=${gpuFlags.gradientCheckpointing}, cache_latents=${gpuFlags.cacheLatents}`);
+      } else {
+        log(`GPU VRAM unknown — using conservative training config`);
       }
+
+      // Regenerate and upload kohya config — always generate fresh so code changes
+      // are reflected even when linking to an existing pod without repackaging.
+      const kohyaConf = generateKohyaConfig({
+        triggerWord: character.triggerWord,
+        datasetDir: `/workspace/dataset`,
+        resolution: config.resolution,
+        batchSize: gpuFlags.batchSize,
+      });
+      const configPath = `${character.outputDir}/kohya_config.toml`;
+      await invoke("save_project", { path: configPath, data: kohyaConf });
+      setUploadStatus(`Uploading kohya_config.toml…`);
+      log(`Uploading kohya_config.toml…`);
+      await jupyterUploadFile(jUrl, JUPYTER_PASS, `workspace/${configName}`, configPath);
+      log(`Config uploaded.`);
 
       // Unzip dataset — fire nohup, then poll a marker file (avoids WebSocket early-close issue)
       setUploadStatus(`Extracting dataset on pod…`);
@@ -287,37 +385,60 @@ export default function RunPodLauncher() {
       if (!extracted) throw new Error("Dataset extraction timed out after 5 minutes");
 
       // Handle base model checkpoint
+      // Strip hash suffix (Forge adds "[abcd1234]") and take only the basename —
+      // the pod has a flat /workspace/models/ dir, no subdirectory structure from local paths.
       const modelName = (character.baseModel || "model.safetensors").replace(/\s*\[.*?\]\s*$/, "").trim();
-      const modelOnVolume = existing?.modelName === modelName;
+      const modelBaseName = modelName.split(/[\\/]/).pop() || "model.safetensors";
+
+      // Check the volume's own manifest file — authoritative across sessions and machines.
+      // Falls back to local volumeContents cache if manifest isn't readable.
+      let modelOnVolume = false;
+      try {
+        const manifest = await invoke<string>("jupyter_read_file", { jupyterUrl: jUrl, password: JUPYTER_PASS, remotePath: "workspace/.model_manifest" });
+        modelOnVolume = manifest.trim() === modelBaseName;
+      } catch { /* manifest absent — volume is fresh or manifest was not written */ }
+      if (!modelOnVolume) modelOnVolume = existing?.modelName === modelBaseName;
 
       if (modelOnVolume) {
-        log(`Model already on volume (${modelName}) — skipping.`);
+        log(`Model already on volume (${modelBaseName}) — skipping download.`);
       } else if (config.baseModelDownloadUrl) {
         // Download from URL on the pod — much faster than uploading locally
-        if (existing?.modelName && existing.modelName !== modelName) {
-          log(`WARNING: Replacing model on volume (${existing.modelName} → ${modelName}).`);
+        if (existing?.modelName && existing.modelName !== modelBaseName) {
+          log(`WARNING: Replacing model on volume (${existing.modelName} → ${modelBaseName}).`);
         }
-        setUploadStatus(`Downloading ${modelName} on pod…`);
         log(`Downloading checkpoint via pod: ${config.baseModelDownloadUrl}`);
         await jupyterRunCommand(jUrl, JUPYTER_PASS,
-          `wget -q --show-progress -O /workspace/models/${modelName} "${config.baseModelDownloadUrl}" && echo DONE`
+          `rm -f /workspace/.model_done; mkdir -p /workspace/models && nohup bash -c 'wget -q -O /workspace/models/${modelBaseName} "${config.baseModelDownloadUrl}" && echo "${modelBaseName}" > /workspace/.model_manifest && echo done > /workspace/.model_done' &`
         );
-        log(`Model download started on pod.`);
-      } else if (config.baseModelLocalPath) {
-        if (existing?.modelName && existing.modelName !== modelName) {
-          log(`WARNING: Replacing model on volume (${existing.modelName} → ${modelName}).`);
+        // Poll until download completes (up to 30 min)
+        let modelReady = false;
+        for (let i = 0; i < 120 && !modelReady; i++) {
+          await new Promise(r => setTimeout(r, 15000));
+          const elapsed = `${Math.floor((i + 1) * 15 / 60)}m ${((i + 1) * 15) % 60}s`;
+          setUploadStatus(`Downloading ${modelBaseName} on pod… (${elapsed})`);
+          try {
+            await invoke<string>("jupyter_read_file", { jupyterUrl: jUrl, password: JUPYTER_PASS, remotePath: "workspace/.model_done" });
+            modelReady = true;
+          } catch { /* not done yet */ }
         }
-        setUploadStatus(`Uploading ${modelName} from local disk…`);
+        if (!modelReady) throw new Error(`Model download timed out after 30 minutes`);
+        log(`Model downloaded.`);
+      } else if (config.baseModelLocalPath) {
+        if (existing?.modelName && existing.modelName !== modelBaseName) {
+          log(`WARNING: Replacing model on volume (${existing.modelName} → ${modelBaseName}).`);
+        }
+        setUploadStatus(`Uploading ${modelBaseName} from local disk…`);
         log(`Uploading checkpoint from local path (this may take a while)…`);
-        await jupyterUploadFile(jUrl, JUPYTER_PASS, `workspace/models/${modelName}`, config.baseModelLocalPath);
+        await jupyterUploadFile(jUrl, JUPYTER_PASS, `workspace/models/${modelBaseName}`, config.baseModelLocalPath);
+        await jupyterRunCommand(jUrl, JUPYTER_PASS, `echo "${modelBaseName}" > /workspace/.model_manifest`);
         log(`Model uploaded.`);
       } else {
-        log(`WARNING: No base model source set. Training will fail unless the model is already at /workspace/models/${modelName}.`);
+        log(`WARNING: No base model source set. Training will fail unless the model is already at /workspace/models/${modelBaseName}.`);
       }
 
       // Record what's on the volume
       if (volumeId) {
-        setSettings({ volumeContents: { ...settings.volumeContents, [volumeId]: { datasetKey, modelName, uploadedAt: new Date().toISOString() } } });
+        setSettings({ volumeContents: { ...settings.volumeContents, [volumeId]: { datasetKey, modelName: modelBaseName, uploadedAt: new Date().toISOString() } } });
       }
 
       // Run training in background
@@ -326,59 +447,108 @@ export default function RunPodLauncher() {
       const networkAlpha = Math.floor(config.networkDim / 2);
       const lrWarmupSteps = Math.round(config.steps * 0.05);
       const saveEveryNSteps = Math.max(100, Math.round(config.steps / 20));
-      log(`[info] accelerate launch train_network.py --dataset_config /workspace/kohya_config.toml --pretrained_model_name_or_path /workspace/models/${modelName} --max_train_steps ${config.steps}`);
+      const trainScript = config.sdxl ? "sdxl_train_network.py" : "train_network.py";
+      const gradCkptFlag = gpuFlags.gradientCheckpointing ? "--gradient_checkpointing" : "";
+      const cacheLatentsFlag = gpuFlags.cacheLatents ? "--cache_latents" : "";
+      log(`[info] accelerate launch ${trainScript} --dataset_config /workspace/kohya_config.toml --pretrained_model_name_or_path /workspace/models/${modelBaseName} --max_train_steps ${config.steps}`);
       await jupyterRunCommand(jUrl, JUPYTER_PASS,
-        `nohup bash -c '> /workspace/training.log; SCRIPT=\$(find /workspace -maxdepth 5 -name "train_network.py" 2>/dev/null | head -1); if [ -z "\$SCRIPT" ]; then echo "ERROR: train_network.py not found" >> /workspace/training.log; exit 1; fi; PYTHON=""; for P in /venv/bin/python3 /venv/bin/python /opt/conda/bin/python3 /workspace/venv/bin/python3 /workspace/venv/bin/python /usr/local/bin/python3; do if [ -f "\$P" ] && "\$P" -c "import accelerate" 2>/dev/null; then PYTHON="\$P"; break; fi; done; if [ -z "\$PYTHON" ]; then echo "ERROR: no Python with accelerate found" >> /workspace/training.log; exit 1; fi; ACCEL=\$(dirname "\$PYTHON")/accelerate; mkdir -p /workspace/output; echo "launcher: \$ACCEL" >> /workspace/training.log; cd "\$(dirname "\$SCRIPT")" && "\$ACCEL" launch --num_cpu_threads_per_process 1 "\$SCRIPT" --dataset_config /workspace/kohya_config.toml --pretrained_model_name_or_path /workspace/models/${modelName} --output_dir /workspace/output --output_name ${character.triggerWord}_lora --save_model_as safetensors --max_train_steps ${config.steps} --learning_rate ${config.learningRate} --lr_scheduler cosine_with_restarts --lr_warmup_steps ${lrWarmupSteps} --optimizer_type AdamW8bit --network_module networks.lora --network_dim ${config.networkDim} --network_alpha ${networkAlpha} --mixed_precision bf16 --save_precision fp16 --gradient_checkpointing --xformers --save_every_n_steps ${saveEveryNSteps} >> /workspace/training.log 2>&1' &`
+        `nohup bash -c '> /workspace/training.log; SCRIPT=\$(find /workspace -maxdepth 5 -name "${trainScript}" 2>/dev/null | head -1); if [ -z "\$SCRIPT" ]; then echo "ERROR: ${trainScript} not found" >> /workspace/training.log; exit 1; fi; PYTHON=""; for P in /venv/bin/python3 /venv/bin/python /opt/conda/bin/python3 /workspace/venv/bin/python3 /workspace/venv/bin/python /usr/local/bin/python3; do if [ -f "\$P" ] && "\$P" -c "import accelerate" 2>/dev/null; then PYTHON="\$P"; break; fi; done; if [ -z "\$PYTHON" ]; then echo "ERROR: no Python with accelerate found" >> /workspace/training.log; exit 1; fi; ACCEL=\$(dirname "\$PYTHON")/accelerate; mkdir -p /workspace/output; echo "launcher: \$ACCEL" >> /workspace/training.log; cd "\$(dirname "\$SCRIPT")" && "\$ACCEL" launch --num_cpu_threads_per_process 1 "\$SCRIPT" --dataset_config /workspace/kohya_config.toml --pretrained_model_name_or_path /workspace/models/${modelBaseName} --output_dir /workspace/output --output_name ${character.triggerWord}_lora --save_model_as safetensors --max_train_steps ${config.steps} --learning_rate ${config.learningRate} --lr_scheduler cosine_with_restarts --lr_warmup_steps ${lrWarmupSteps} --optimizer_type AdamW8bit --network_module networks.lora --network_dim ${config.networkDim} --network_alpha ${networkAlpha} --mixed_precision fp16 --save_precision fp16 ${gradCkptFlag} ${cacheLatentsFlag} --save_every_n_steps ${saveEveryNSteps} >> /workspace/training.log 2>&1' &`
       );
 
       setUploadStatus(null);
       log(`Training started — polling /workspace/training.log for progress…`);
-
-      // Poll training log and mirror important lines to the local log
-      let seenLines = 0;
-      let inTraceback = false;
-      if (logPollRef.current) clearInterval(logPollRef.current);
-      logPollRef.current = setInterval(async () => {
-        try {
-          const content = await invoke<string>("jupyter_read_file", {
-            jupyterUrl: jUrl,
-            password: JUPYTER_PASS,
-            remotePath: "workspace/training.log",
-          });
-          const lines = content.split("\n");
-          const newLines = lines.slice(seenLines);
-          seenLines = lines.length;
-
-          for (const raw of newLines) {
-            const line = raw.trimEnd();
-            if (!line) { inTraceback = false; continue; }
-            // Skip tqdm progress-bar lines (contain block chars or bare percentage bars)
-            if (/[█▏▎▍▌▋▊▉]|^\s*\d+%\s*\|/.test(line)) continue;
-
-            const isError = /error|traceback|exception/i.test(line);
-            const isImportant = isError || inTraceback ||
-              /loss[= ]|epoch|saving|saved|step\s+\d|finished|complete|cuda|oom|python:|workspace:|dataset:/i.test(line);
-
-            if (isImportant) {
-              log(`[pod] ${line}`);
-              if (isError) inTraceback = true;
-            }
-          }
-
-          const newContent = newLines.join("\n");
-          // Stop polling on completion or fatal halt (check only new lines to avoid re-triggering)
-          if (/training (finished|complete|done)/i.test(newContent)) {
-            if (logPollRef.current) { clearInterval(logPollRef.current); logPollRef.current = null; }
-          } else if (/ModuleNotFoundError|No module named|command not found|exit 1/i.test(newContent)) {
-            if (logPollRef.current) { clearInterval(logPollRef.current); logPollRef.current = null; }
-            log(`Training halted — see errors above.`);
-          }
-        } catch { /* file not yet available */ }
-      }, 5000);
+      startLogPolling(jUrl, 0);
     } catch (err) {
       setUploadStatus(null);
       log(`Upload error: ${err}`);
     }
+  };
+
+  const downloadOutputs = async (jUrl: string) => {
+    const JUPYTER_PASS = "lorastudio";
+    const char = characterRef.current;
+    const destDir = char.loraDir || char.outputDir;
+    if (!destDir) { log(`Cannot download: no loraDir or outputDir set on character.`); return; }
+
+    log(`Training complete — downloading LoRA to ${destDir}…`);
+    try {
+      // Write file listing to a temp file on the pod
+      await jupyterRunCommand(jUrl, JUPYTER_PASS, `ls /workspace/output/*.safetensors 2>/dev/null > /workspace/.output_list.txt`);
+      await new Promise(r => setTimeout(r, 1500));
+      const listing = await invoke<string>("jupyter_read_file", { jupyterUrl: jUrl, password: JUPYTER_PASS, remotePath: "workspace/.output_list.txt" });
+      const files = listing.split("\n").map(l => l.trim()).filter(l => l.endsWith(".safetensors"));
+
+      if (files.length === 0) {
+        log(`No .safetensors files found in /workspace/output/`);
+        return;
+      }
+
+      const toDownload = downloadIntermediatesRef.current
+        ? files
+        : files.filter(f => !/-step\d+/.test(f));
+
+      log(`Found ${files.length} file(s), downloading ${toDownload.length}…`);
+      for (const remotePath of toDownload) {
+        const filename = remotePath.split("/").pop()!;
+        const localPath = `${destDir}/${filename}`;
+        log(`Downloading ${filename}…`);
+        await invoke("jupyter_download_file", {
+          jupyterUrl: jUrl,
+          password: JUPYTER_PASS,
+          remotePath: remotePath.replace(/^\//, ""),
+          localPath,
+        });
+        log(`Saved → ${localPath}`);
+      }
+      log(`Download complete.`);
+    } catch (err) {
+      log(`Download error: ${err}`);
+    }
+  };
+
+  const startLogPolling = (jUrl: string, fromLine: number) => {
+    const JUPYTER_PASS = "lorastudio";
+    let seenLines = fromLine;
+    let inTraceback = false;
+    if (logPollRef.current) clearInterval(logPollRef.current);
+    logPollRef.current = setInterval(async () => {
+      try {
+        const content = await invoke<string>("jupyter_read_file", {
+          jupyterUrl: jUrl,
+          password: JUPYTER_PASS,
+          remotePath: "workspace/training.log",
+        });
+        const lines = content.split("\n");
+        const newLines = lines.slice(seenLines);
+        seenLines = lines.length;
+
+        for (const raw of newLines) {
+          const line = raw.trimEnd();
+          if (!line) { inTraceback = false; continue; }
+          // Skip tqdm progress-bar lines (contain block chars or bare percentage bars)
+          if (/[█▏▎▍▌▋▊▉]|^\s*\d+%\s*\|/.test(line)) continue;
+
+          const isError = /error|traceback|exception/i.test(line);
+          const isImportant = isError || inTraceback ||
+            /loss[= ]|epoch|saving|saved|step\s+\d|finished|complete|cuda|oom|python:|workspace:|dataset:/i.test(line);
+
+          if (isImportant) {
+            log(`[pod] ${line}`);
+            if (isError) inTraceback = true;
+          }
+        }
+
+        const newContent = newLines.join("\n");
+        // Stop polling on completion or fatal halt (check only new lines to avoid re-triggering)
+        if (/training (finished|complete|done)/i.test(newContent)) {
+          if (logPollRef.current) { clearInterval(logPollRef.current); logPollRef.current = null; }
+          downloadOutputs(jUrl);
+        } else if (/ModuleNotFoundError|No module named|command not found|exit 1/i.test(newContent)) {
+          if (logPollRef.current) { clearInterval(logPollRef.current); logPollRef.current = null; }
+          log(`Training halted — see errors above.`);
+        }
+      } catch { /* file not yet available */ }
+    }, 5000);
   };
 
   const startPolling = (podId: string) => {
@@ -485,9 +655,15 @@ export default function RunPodLauncher() {
     const selectedVol = networkVolumes.find((v) => v.id === config.networkVolumeId);
     const dataCenterId = selectedVol?.dataCenterId;
     try {
-      const gpuTypes = await listGpuTypes(settings.runpodApiKey, dataCenterId);
+      // Always fetch global GPU list; if a volume is selected, also fetch DC-specific to identify cached GPUs
+      const [allGpus, dcGpus] = await Promise.all([
+        listGpuTypes(settings.runpodApiKey),
+        dataCenterId ? listGpuTypes(settings.runpodApiKey, dataCenterId) : Promise.resolve([]),
+      ]);
+      setDcGpuIds(new Set(dcGpus.map((g) => g.id)));
+
       const map: Record<string, { secure: number; community: number }> = {};
-      for (const g of gpuTypes) {
+      for (const g of allGpus) {
         map[g.id] = {
           secure: g.lowestPrice?.uninterruptablePrice ?? 0,
           community: g.lowestPrice?.minimumBidPrice ?? 0,
@@ -496,7 +672,7 @@ export default function RunPodLauncher() {
       setLivePrices(map);
       // Filter to GPUs that support the selected cloud type, sort by VRAM desc
       // Prefer GPUs with a non-zero price (available now), but show all supported ones
-      const supported = gpuTypes.filter((g) =>
+      const supported = allGpus.filter((g) =>
         config.cloudType === "COMMUNITY" ? g.communityCloud : g.secureCloud
       );
       const hasPrice = (g: typeof supported[0]) =>
@@ -512,7 +688,6 @@ export default function RunPodLauncher() {
           return b.memoryInGb - a.memoryInGb;
         })
       );
-      if (dataCenterId) log(`Showing GPUs available in ${dataCenterId} (${supported.length} found)`);
     } catch (err) {
       log(`Price fetch error: ${err}`);
     }
@@ -706,10 +881,21 @@ export default function RunPodLauncher() {
           <div style={{ marginBottom: "16px" }}>
             <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: "8px" }}>
               <div className="section-label" style={{ margin: 0 }}>GPU</div>
-              <button className="btn-ghost" onClick={fetchPrices} disabled={fetchingPrices} style={{ padding: "2px 8px", fontSize: "10px" }}>
-                <RefreshCw size={10} style={{ display: "inline", marginRight: "4px" }} />
-                {fetchingPrices ? "Fetching…" : "Refresh Prices"}
-              </button>
+              <div style={{ display: "flex", gap: "6px" }}>
+                {bestValueGpuId && bestValueGpuId.id !== config.gpuTypeId && (
+                  <button
+                    className="btn-ghost"
+                    onClick={() => setConfig({ gpuTypeId: bestValueGpuId.id })}
+                    style={{ padding: "2px 8px", fontSize: "10px", color: "var(--green)", borderColor: "var(--green)" }}
+                  >
+                    Select best
+                  </button>
+                )}
+                <button className="btn-ghost" onClick={fetchPrices} disabled={fetchingPrices} style={{ padding: "2px 8px", fontSize: "10px" }}>
+                  <RefreshCw size={10} style={{ display: "inline", marginRight: "4px" }} />
+                  {fetchingPrices ? "Fetching…" : "Refresh Prices"}
+                </button>
+              </div>
             </div>
             {(liveGpuTypes
               ? liveGpuTypes.filter((g) => config.cloudType === "COMMUNITY" ? g.communityCloud : g.secureCloud)
@@ -722,6 +908,7 @@ export default function RunPodLauncher() {
                   : `$${price.secure.toFixed(2)}/hr`
                 : null;
               const selected = config.gpuTypeId === gpu.id;
+              const isBest = bestValueGpuId?.id === gpu.id;
               return (
                 <div
                   key={gpu.id}
@@ -732,7 +919,7 @@ export default function RunPodLauncher() {
                     borderRadius: "5px",
                     cursor: "pointer",
                     background: selected ? "var(--accent-glow)" : "var(--bg-2)",
-                    border: `1px solid ${selected ? "var(--accent-dim)" : "var(--border)"}`,
+                    border: `1px solid ${selected ? "var(--accent-dim)" : isBest ? "var(--green)" : "var(--border)"}`,
                     transition: "all 0.1s",
                     display: "flex",
                     alignItems: "center",
@@ -743,8 +930,31 @@ export default function RunPodLauncher() {
                   <div style={{ fontFamily: "var(--font-mono)", fontSize: "11px", color: selected ? "var(--accent-bright)" : "var(--text-primary)", flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                     {gpu.displayName}
                   </div>
-                  <div style={{ fontFamily: "var(--font-mono)", fontSize: "10px", color: selected ? "var(--accent-bright)" : "var(--text-muted)", flexShrink: 0 }}>
-                    {gpu.memoryInGb}GB{priceStr ? ` · ${priceStr}` : ""}
+                  <div style={{ display: "flex", alignItems: "center", gap: "6px", flexShrink: 0 }}>
+                    {isBest && (
+                      <div style={{
+                        fontFamily: "var(--font-mono)", fontSize: "9px",
+                        color: "var(--green)", letterSpacing: "0.06em", textTransform: "uppercase",
+                        padding: "1px 5px", borderRadius: "3px",
+                        background: "rgba(74,154,106,0.12)", border: "1px solid var(--green)",
+                      }}>
+                        best value · ~${bestValueGpuId.cost.toFixed(2)}
+                      </div>
+                    )}
+                    {config.networkVolumeId && (
+                      dcGpuIds.has(gpu.id) ? (
+                        <div style={{ fontFamily: "var(--font-mono)", fontSize: "9px", color: "var(--green)", padding: "1px 5px", borderRadius: "3px", background: "rgba(74,154,106,0.10)", border: "1px solid rgba(74,154,106,0.3)" }}>
+                          cached
+                        </div>
+                      ) : (
+                        <div style={{ fontFamily: "var(--font-mono)", fontSize: "9px", color: "var(--text-muted)", padding: "1px 5px", borderRadius: "3px", background: "var(--bg-3)", border: "1px solid var(--border)" }}>
+                          ↓ dl model
+                        </div>
+                      )
+                    )}
+                    <div style={{ fontFamily: "var(--font-mono)", fontSize: "10px", color: selected ? "var(--accent-bright)" : "var(--text-muted)" }}>
+                      {gpu.memoryInGb}GB{priceStr ? ` · ${priceStr}` : ""}
+                    </div>
                   </div>
                 </div>
               );
@@ -778,13 +988,36 @@ export default function RunPodLauncher() {
 
           {/* Training hyperparams */}
           <div style={{ marginBottom: "20px" }}>
-            <div className="section-label">Training Hyperparameters</div>
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: "6px" }}>
+              <div className="section-label" style={{ margin: 0 }}>Training Hyperparameters</div>
+              <div style={{ display: "flex", gap: "4px" }}>
+                {(["SDXL", "SD 1.5"] as const).map((label) => {
+                  const isXL = label === "SDXL";
+                  const active = config.sdxl === isXL;
+                  return (
+                    <button
+                      key={label}
+                      onClick={() => setConfig({ sdxl: isXL })}
+                      style={{
+                        padding: "2px 8px", fontSize: "10px", cursor: "pointer",
+                        background: active ? "var(--bg-4)" : "var(--bg-2)",
+                        border: `1px solid ${active ? "var(--accent-dim)" : "var(--border)"}`,
+                        color: active ? "var(--accent-bright)" : "var(--text-muted)",
+                        borderRadius: "4px",
+                        fontFamily: "var(--font-display)", fontWeight: 600, letterSpacing: "0.06em",
+                      }}
+                    >{label}</button>
+                  );
+                })}
+              </div>
+            </div>
             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "8px", marginTop: "6px" }}>
               {[
                 { label: "Steps", key: "steps" as const, type: "number" },
                 { label: "LR", key: "learningRate" as const, type: "text" },
                 { label: "Network Dim", key: "networkDim" as const, type: "number" },
                 { label: "Resolution", key: "resolution" as const, type: "number" },
+                { label: "Container Disk (GB)", key: "containerDiskInGb" as const, type: "number" },
               ].map(({ label, key, type }) => {
                 const suggestedSteps = approved.length > 0
                   ? Math.max(500, Math.min(4000, Math.round(approved.length * 100 / 100) * 100))
@@ -821,6 +1054,24 @@ export default function RunPodLauncher() {
             }}>
               Recommended for Illustrious: dim=32, alpha=16, lr=1e-4, 1500–2500 steps depending on dataset size.
             </div>
+            <div style={{ marginTop: "10px", display: "flex", alignItems: "center", gap: "16px" }}>
+              {[
+                { label: "Final LoRA only", value: false },
+                { label: "Final + intermediates", value: true },
+              ].map(({ label, value }) => (
+                <label key={label} style={{ display: "flex", alignItems: "center", gap: "5px", cursor: "pointer", fontFamily: "var(--font-body)", fontSize: "11px", color: downloadIntermediates === value ? "var(--text)" : "var(--text-muted)" }}>
+                  <input
+                    type="radio"
+                    checked={downloadIntermediates === value}
+                    onChange={() => setDownloadIntermediates(value)}
+                    style={{ accentColor: "var(--accent)" }}
+                  />
+                  {label}
+                </label>
+              ))}
+              <span style={{ fontFamily: "var(--font-mono)", fontSize: "9px", color: "var(--text-muted)", letterSpacing: "0.04em" }}>auto-download on complete</span>
+            </div>
+
             <div style={{ marginTop: "12px" }}>
               <div style={{ fontFamily: "var(--font-mono)", fontSize: "9px", color: "var(--text-muted)", marginBottom: "4px", letterSpacing: "0.06em", textTransform: "uppercase" }}>
                 Base Model — Search <span style={{ opacity: 0.6 }}>(CivitAI → HuggingFace)</span>

@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { FolderOpen, Save, FolderInput, Clock, X, FilePlus, RefreshCw, ChevronDown } from "lucide-react";
 import PageHeader from "../components/PageHeader";
@@ -118,12 +118,18 @@ function ModelPicker({ models, value, onChange, onClear }: {
 }
 
 export default function CharacterSetup() {
-  const { character, setCharacter, settings, setSettings, importProject, images, updateImage, updateGeneration, clearImages, markSaved } = useStore();
+  const { character, setCharacter, settings, setSettings, importProject, images, updateImage, updateGeneration, clearImages, markSaved, projectLoadCount } = useStore();
   const [confirmNew, setConfirmNew] = useState(false);
   const [committedTriggerWord, setCommittedTriggerWord] = useState(character.triggerWord);
+  const [committedAtLoad, setCommittedAtLoad] = useState(projectLoadCount);
   const [updatingCaptions, setUpdatingCaptions] = useState(false);
 
-  const triggerWordChanged = character.triggerWord !== committedTriggerWord && !!committedTriggerWord && images.length > 0;
+  useEffect(() => {
+    setCommittedTriggerWord(character.triggerWord);
+    setCommittedAtLoad(projectLoadCount);
+  }, [projectLoadCount]);
+
+  const triggerWordChanged = character.triggerWord !== committedTriggerWord && !!committedTriggerWord && images.length > 0 && committedAtLoad === projectLoadCount;
 
   const updateCaptionTrigger = async () => {
     setUpdatingCaptions(true);

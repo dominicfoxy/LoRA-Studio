@@ -108,7 +108,7 @@ export async function createPod(apiKey: string, spec: PodSpec): Promise<Pod> {
       gpuTypeId: spec.gpuTypeId,
       cloudType: spec.cloudType,
       containerDiskInGb: spec.containerDiskInGb,
-      volumeInGb: spec.volumeInGb || 5,
+      volumeInGb: spec.volumeInGb,
       volumeMountPath: spec.volumeMountPath ?? "/workspace",
       env: spec.env,
       ...(spec.ports ? { ports: spec.ports } : {}),
@@ -176,13 +176,30 @@ export async function listPods(apiKey: string): Promise<Pod[]> {
 }
 
 // GPU recommendations for Kohya SDXL LoRA training
-// stepsPerSec: approximate throughput at 1024×1024, batch=1, bf16, gradient checkpointing
+// stepsPerSec: approximate throughput — TODO: recalibrate from real observations
 export const RECOMMENDED_GPUS = [
   { id: "NVIDIA A100 80GB PCIe",    label: "A100 80GB",      vram: 80, stepsPerSec: 3.2 },
   { id: "NVIDIA A100-SXM4-40GB",   label: "A100 40GB",      vram: 40, stepsPerSec: 2.8 },
   { id: "NVIDIA RTX A6000",         label: "RTX A6000 48GB", vram: 48, stepsPerSec: 1.8 },
+  { id: "NVIDIA L40S",              label: "L40S 48GB",       vram: 48, stepsPerSec: 1.8 },
   { id: "NVIDIA GeForce RTX 3090",  label: "RTX 3090 24GB",  vram: 24, stepsPerSec: 1.0 },
 ];
+
+export interface GpuTrainingFlags {
+  batchSize: number;
+  gradientCheckpointing: boolean;
+  cacheLatents: boolean;
+}
+
+// Returns optimal training flags for the available VRAM.
+// Higher VRAM → larger batch, skip gradient checkpointing, cache latents.
+export function gpuTrainingFlags(vramGb: number): GpuTrainingFlags {
+  if (vramGb >= 80) return { batchSize: 4, gradientCheckpointing: false, cacheLatents: true };
+  if (vramGb >= 48) return { batchSize: 2, gradientCheckpointing: false, cacheLatents: true };
+  if (vramGb >= 40) return { batchSize: 2, gradientCheckpointing: true,  cacheLatents: true };
+  if (vramGb >= 20) return { batchSize: 1, gradientCheckpointing: true,  cacheLatents: true };
+  return                    { batchSize: 1, gradientCheckpointing: true,  cacheLatents: false };
+}
 
 // Kohya training pod template
 export const KOHYA_POD_TEMPLATE = {
@@ -215,20 +232,17 @@ export async function jupyterRunSync(jupyterUrl: string, password: string, comma
   await invoke("jupyter_run_sync", { jupyterUrl, password, command, timeoutSecs });
 }
 
+// Generates ONLY the dataset config TOML passed via --dataset_config.
+// Training hyperparameters (optimizer, network, steps, etc.) are passed as CLI
+// args by the training command — they are NOT valid keys in this file and will
+// cause a voluptuous validation error if included.
 export function generateKohyaConfig(params: {
   triggerWord: string;
   datasetDir: string;
-  outputDir: string;
-  baseModel: string;
-  steps: number;
-  learningRate: string;
-  networkDim: number;
   resolution: number;
+  batchSize?: number;
 }): string {
-  const networkAlpha = Math.floor(params.networkDim / 2);
-  const lrWarmupSteps = Math.round(params.steps * 0.05);
-  const saveEveryNSteps = Math.max(100, Math.round(params.steps / 20));
-
+  const batchSize = params.batchSize ?? 1;
   return `[general]
 enable_bucket = true
 shuffle_caption = true
@@ -238,41 +252,12 @@ keep_tokens = 1
 
 [[datasets]]
 resolution = ${params.resolution}
-batch_size = 1
+batch_size = ${batchSize}
 
   [[datasets.subsets]]
   image_dir = "${params.datasetDir}"
   class_tokens = "${params.triggerWord}"
   num_repeats = 10
   keep_tokens = 1
-
-[optimizer_arguments]
-learning_rate = ${params.learningRate}
-lr_scheduler = "cosine_with_restarts"
-lr_warmup_steps = ${lrWarmupSteps}
-optimizer_type = "AdamW8bit"
-
-[training_arguments]
-pretrained_model_name_or_path = "${params.baseModel}"
-output_dir = "${params.outputDir}"
-output_name = "${params.triggerWord}_lora"
-save_model_as = "safetensors"
-save_every_n_steps = ${saveEveryNSteps}
-max_train_steps = ${params.steps}
-mixed_precision = "bf16"
-save_precision = "fp16"
-xformers = true
-gradient_checkpointing = true
-persistent_data_loader_workers = true
-max_data_loader_n_workers = 2
-
-[network_arguments]
-network_module = "networks.lora"
-network_dim = ${params.networkDim}
-network_alpha = ${networkAlpha}
-
-[sample_prompt_arguments]
-sample_every_n_steps = ${saveEveryNSteps}
-sample_sampler = "euler_a"
 `;
 }
