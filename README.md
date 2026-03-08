@@ -48,12 +48,18 @@ Make sure Forge is running with the API enabled:
 
 ## Installation
 
+**Pre-built releases** are available on the [Releases](https://github.com/dominicfoxy/LoRA-Studio/releases) page:
+- Linux: prefer `.deb` over `.AppImage` — the AppImage bundles WebKitGTK and is much larger
+- macOS: `.dmg` (right-click → Open if Gatekeeper blocks it)
+- Windows: `.msi` or `.exe` (click "More info" → "Run anyway" if SmartScreen appears)
+
+**Build from source:**
 ```bash
-git clone <this-repo> lora-studio
+git clone https://github.com/dominicfoxy/LoRA-Studio lora-studio
 cd lora-studio
 npm install
 npm run tauri dev    # development mode
-npm run tauri build  # production AppImage
+npm run tauri build  # production build
 ```
 
 ## Usage
@@ -85,23 +91,31 @@ npm run tauri build  # production AppImage
 - **Save All** writes all `.txt` sidecars
 
 ### 5. RunPod Launcher
-- Configure GPU (A100 40GB recommended for SDXL, ~$1.64 USD/hr)
-- Set training hyperparameters
-- **Package Dataset** → zips approved images + captions + generates `kohya_config.toml`
-- **Launch Training Pod** → spins up Kohya pod on RunPod
-- Follow log output for pod URL, then upload dataset and run training command
+- Select GPU and cloud type (SECURE/COMMUNITY/ALL)
+- Optionally select a **Network Volume** to cache the base model across runs
+- Set base model via search (CivitAI → HuggingFace) or local path
+- Toggle **SDXL** or **SD 1.5** to match your checkpoint architecture
+- Set training hyperparameters (steps, LR, network dim, resolution)
+- Choose **Final LoRA only** or **Final + intermediates** for auto-download
+- **Package & Launch** → the app handles everything automatically:
+  - Zips dataset, spins up Kohya pod, uploads dataset + config
+  - Downloads or uploads base model checkpoint
+  - Launches training with GPU-optimised config (batch size, gradient checkpointing, cache_latents tuned to VRAM)
+  - Streams training logs in real-time
+  - Downloads finished LoRA to your `loraDir` on completion
 
 ## Training Tips (Illustrious SDXL)
 
 | Parameter | Recommended | Notes |
 |---|---|---|
-| Network dim | 32 | Higher = more capacity but larger file |
-| Network alpha | 16 | Half of dim is standard |
+| Network dim | 64 | Higher = more capacity but larger file |
+| Network alpha | 32 | Half of dim is standard |
 | Learning rate | 1e-4 | Lower = more conservative |
 | Steps | 1500–2500 | ~15 steps/image is a good ratio |
 | Resolution | 1024 | Illustrious native resolution |
-| Batch size | 1 | Safe for 24GB VRAM |
+| Batch size | auto | Tuned to GPU VRAM (1–4) |
 | Optimizer | AdamW8bit | Memory efficient |
+| Mixed precision | fp16 | Better color fidelity than bf16 |
 
 ## Dataset Recommendations
 
@@ -122,20 +136,12 @@ output_dir/
   <trigger>_dataset.zip     # packaged dataset for RunPod upload
 ```
 
-## RunPod Pod Setup
+## RunPod Notes
 
-After pod launches and shows RUNNING:
-1. Open Jupyter at the provided URL (password: `lorastudio`)
-2. Upload `<trigger>_dataset.zip` → extract to `/workspace/dataset/`
-3. Upload `kohya_config.toml` → `/workspace/`
-4. Upload your base model `.safetensors` → `/workspace/models/`
-5. Open terminal in Jupyter, run:
-   ```bash
-   python /workspace/kohya_ss/train_network.py --config_file /workspace/kohya_config.toml
-   ```
-6. Sample images saved every 100 steps to `/workspace/output/sample/`
-7. Final LoRA at `/workspace/output/<trigger>_lora.safetensors`
-8. Download and terminate pod
+- Training is fully automated — no manual Jupyter interaction required
+- A **Network Volume** caches the base model between runs, avoiding repeated 6GB+ downloads. Volumes are datacenter-specific; if your chosen GPU isn't available in the volume's datacenter, the app will launch without the volume and download fresh automatically
+- The finished LoRA downloads to your character's `loraDir` when training completes
+- **Terminate the pod** after training to stop billing — auto-terminate on download is planned
 
 ## Architecture
 
