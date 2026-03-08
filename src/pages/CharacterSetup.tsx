@@ -436,7 +436,7 @@ export default function CharacterSetup() {
 
           <div style={{ gridColumn: "1 / -1" }}>
             <Field label="Dataset Output Directory" hint="Where generated images and captions will be saved">
-              <DirField value={character.outputDir} onChange={(v) => { setCharacter({ outputDir: v }); invoke("ensure_dir", { path: v }); }} placeholder="/mnt/nas/ai/datasets/sablefox" />
+              <DirField value={character.outputDir} onChange={(v) => setCharacter({ outputDir: v })} placeholder="/mnt/nas/ai/datasets/sablefox" />
             </Field>
           </div>
 

@@ -5,6 +5,7 @@ import {
 } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { BUILT_IN_THEMES, applyTheme, resetTheme } from "./lib/themes";
 import CharacterSetup from "./pages/CharacterSetup";
 import ShotList from "./pages/ShotList";
 import GeneratorSettings from "./pages/GeneratorSettings";
@@ -31,12 +32,36 @@ export default function App() {
   const isDirty = useStore((s) => s.isDirty);
   const markSaved = useStore((s) => s.markSaved);
   const uiScale = useStore((s) => s.settings.uiScale ?? 1.0);
+  const activeTheme = useStore((s) => s.settings.activeTheme ?? "default");
+  const themeFile = useStore((s) => s.settings.themeFile ?? "");
   const approved = images.filter((i) => i.approved === true).length;
   const [showCloseDialog, setShowCloseDialog] = useState(false);
 
   useEffect(() => {
     document.documentElement.style.zoom = String(uiScale);
   }, [uiScale]);
+
+  useEffect(() => {
+    const builtIn = BUILT_IN_THEMES.find((t) => t.id === activeTheme);
+    const baseVars = builtIn?.vars ?? {};
+
+    if (themeFile) {
+      invoke<string>("load_project", { path: themeFile })
+        .then((raw) => {
+          try {
+            const fileVars = JSON.parse(raw);
+            applyTheme({ ...baseVars, ...fileVars });
+          } catch {
+            applyTheme(baseVars);
+          }
+        })
+        .catch(() => applyTheme(baseVars));
+    } else if (Object.keys(baseVars).length > 0) {
+      applyTheme(baseVars);
+    } else {
+      resetTheme();
+    }
+  }, [activeTheme, themeFile]);
 
   useEffect(() => {
     let unlisten: (() => void) | undefined;
@@ -140,6 +165,13 @@ export default function App() {
         <nav style={{ flex: 1, padding: "12px 8px", display: "flex", flexDirection: "column", gap: "2px" }}>
           {NAV_ITEMS.map(({ to, icon: Icon, label, sub }) => {
             const active = to === "/" ? location.pathname === "/" : location.pathname.startsWith(to);
+            // Settings link: hardcoded colours that bypass CSS vars entirely so it's always
+            // findable regardless of how broken the active theme is.
+            const isSafeLink = to === "/settings";
+            const SAFE_BG     = "rgba(29, 78, 216, 0.20)";
+            const SAFE_BORDER  = "#3b82f6";
+            const SAFE_TEXT    = "#93c5fd";
+            const SAFE_MUTED   = "#6ea8f7";
             return (
               <NavLink
                 key={to}
@@ -151,14 +183,14 @@ export default function App() {
                   padding: "8px 10px",
                   borderRadius: "6px",
                   textDecoration: "none",
-                  background: active ? "var(--bg-3)" : "transparent",
-                  borderLeft: active ? "2px solid var(--accent)" : "2px solid transparent",
+                  background: isSafeLink ? SAFE_BG : active ? "var(--bg-3)" : "transparent",
+                  borderLeft: isSafeLink ? `2px solid ${SAFE_BORDER}` : active ? "2px solid var(--accent)" : "2px solid transparent",
                   transition: "all 0.12s",
                 }}
               >
                 <Icon
                   size={15}
-                  color={active ? "var(--accent-bright)" : "var(--text-muted)"}
+                  color={isSafeLink ? SAFE_BORDER : active ? "var(--accent-bright)" : "var(--text-muted)"}
                   strokeWidth={active ? 2.5 : 1.5}
                 />
                 <div style={{ flex: 1, minWidth: 0 }}>
@@ -166,13 +198,13 @@ export default function App() {
                     fontFamily: "var(--font-display)",
                     fontSize: "13px",
                     fontWeight: active ? 700 : 500,
-                    color: active ? "var(--text-primary)" : "var(--text-secondary)",
+                    color: isSafeLink ? SAFE_TEXT : active ? "var(--text-primary)" : "var(--text-secondary)",
                     letterSpacing: "0.01em",
                   }}>{label}</div>
                   <div style={{
                     fontFamily: "var(--font-mono)",
                     fontSize: "10px",
-                    color: "var(--text-muted)",
+                    color: isSafeLink ? SAFE_MUTED : "var(--text-muted)",
                     letterSpacing: "0.04em",
                   }}>{sub}</div>
                 </div>

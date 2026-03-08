@@ -57,6 +57,7 @@ export default function RunPodLauncher() {
   const [fetchingVolumes, setFetchingVolumes] = useState(false);
   const [uploadStatus, setUploadStatus] = useState<string | null>(null);
   const [trainingHalted, setTrainingHalted] = useState(false);
+  const [downloadFailed, setDownloadFailed] = useState(false);
   const [modelQuery, setModelQuery] = useState("");
   const [modelResults, setModelResults] = useState<SearchResult[]>([]);
   const [modelLoading, setModelLoading] = useState(false);
@@ -460,12 +461,13 @@ export default function RunPodLauncher() {
     const cacheLatentsFlag = gpuFlags.cacheLatents ? "--cache_latents" : "";
     log(`[info] accelerate launch ${trainScript} --optimizer_type ${config.optimizer} --max_train_steps ${config.steps} --network_dim ${config.networkDim} --network_alpha ${networkAlpha}`);
     await jupyterRunCommand(jUrl, JUPYTER_PASS,
-      `nohup bash -c '> /workspace/training.log; SCRIPT=\$(find /workspace -maxdepth 5 -name "${trainScript}" 2>/dev/null | head -1); if [ -z "\$SCRIPT" ]; then echo "ERROR: ${trainScript} not found" >> /workspace/training.log; exit 1; fi; PYTHON=""; for P in /venv/bin/python3 /venv/bin/python /opt/conda/bin/python3 /workspace/venv/bin/python3 /workspace/venv/bin/python /usr/local/bin/python3; do if [ -f "\$P" ] && "\$P" -c "import accelerate" 2>/dev/null; then PYTHON="\$P"; break; fi; done; if [ -z "\$PYTHON" ]; then echo "ERROR: no Python with accelerate found" >> /workspace/training.log; exit 1; fi; ACCEL=\$(dirname "\$PYTHON")/accelerate; mkdir -p /workspace/output; echo "launcher: \$ACCEL" >> /workspace/training.log; export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True; cd "\$(dirname "\$SCRIPT")" && "\$ACCEL" launch --num_cpu_threads_per_process 1 "\$SCRIPT" --dataset_config /workspace/kohya_config.toml --pretrained_model_name_or_path /workspace/models/${modelBaseName} --output_dir /workspace/output --output_name ${character.triggerWord}_lora --save_model_as safetensors --max_train_steps ${config.steps} --learning_rate ${lr} --lr_scheduler ${lrScheduler} ${lrWarmupFlag} --optimizer_type ${config.optimizer} ${optimizerArgs} --network_module networks.lora --network_dim ${config.networkDim} --network_alpha ${networkAlpha} --min_snr_gamma 5 --noise_offset 0.05 --mixed_precision fp16 --save_precision fp16 ${gradCkptFlag} ${cacheLatentsFlag} --save_every_n_steps ${saveEveryNSteps} >> /workspace/training.log 2>&1' &`
+      `nohup bash -c '> /workspace/training.log; SCRIPT=\$(find /workspace -maxdepth 5 -name "${trainScript}" 2>/dev/null | head -1); if [ -z "\$SCRIPT" ]; then echo "ERROR: ${trainScript} not found" >> /workspace/training.log; exit 1; fi; PYTHON=""; for P in /venv/bin/python3 /venv/bin/python /opt/conda/bin/python3 /workspace/venv/bin/python3 /workspace/venv/bin/python /usr/local/bin/python3; do if [ -f "\$P" ] && "\$P" -c "import accelerate" 2>/dev/null; then PYTHON="\$P"; break; fi; done; if [ -z "\$PYTHON" ]; then echo "ERROR: no Python with accelerate found" >> /workspace/training.log; exit 1; fi; ACCEL=\$(dirname "\$PYTHON")/accelerate; mkdir -p /workspace/output; echo "launcher: \$ACCEL" >> /workspace/training.log; export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True; cd "\$(dirname "\$SCRIPT")" && "\$ACCEL" launch --num_cpu_threads_per_process 1 "\$SCRIPT" --dataset_config /workspace/kohya_config.toml --pretrained_model_name_or_path /workspace/models/${modelBaseName} --output_dir /workspace/output --output_name ${character.triggerWord}_lora --save_model_as safetensors --max_train_steps ${config.steps} --learning_rate ${lr} --lr_scheduler ${lrScheduler} ${lrWarmupFlag} --optimizer_type ${config.optimizer} ${optimizerArgs} --network_module networks.lora --network_dim ${config.networkDim} --network_alpha ${networkAlpha} --min_snr_gamma 5 --noise_offset 0.05 --mixed_precision fp16 --save_precision fp16 ${gradCkptFlag} ${cacheLatentsFlag} --save_every_n_steps ${saveEveryNSteps} >> /workspace/training.log 2>&1; EXIT_CODE=\$?; if [ \$EXIT_CODE -eq 0 ]; then echo "training complete" >> /workspace/training.log; else echo "training failed (exit \$EXIT_CODE)" >> /workspace/training.log; fi' &`
     );
     setPipelineStep(3);
     setTrainingHalted(false);
     setUploadStatus(null);
     log(`Training started — polling /workspace/training.log for progress…`);
+    log(`Note: training typically takes 30–90 minutes. You can close the app and reopen it later — it will reconnect to the running pod.`);
     startLogPolling(jUrl, 0);
   };
 
@@ -608,6 +610,7 @@ export default function RunPodLauncher() {
     if (!destDir) { log(`Cannot download: no loraDir or outputDir set on character.`); return; }
 
     setPipelineStep(4);
+    setDownloadFailed(false);
     log(`Training complete — downloading LoRA to ${destDir}…`);
     try {
       // Write file listing to a temp file on the pod
@@ -655,6 +658,8 @@ export default function RunPodLauncher() {
       }
     } catch (err) {
       log(`Download error: ${err}`);
+      log(`Pod is still running — use Retry Download to try again, or open Jupyter to retrieve the file manually.`);
+      setDownloadFailed(true);
     }
   };
 
@@ -674,17 +679,23 @@ export default function RunPodLauncher() {
         const newLines = lines.slice(seenLines);
         seenLines = lines.length;
 
+        let lastPodLine = "";
         for (const raw of newLines) {
           const line = raw.trimEnd();
           if (!line) { inTraceback = false; continue; }
           // Skip tqdm progress-bar lines (contain block chars or bare percentage bars)
           if (/[█▏▎▍▌▋▊▉]|^\s*\d+%\s*\|/.test(line)) continue;
+          // Skip Kohya multi-process bookkeeping (logged 8× per epoch by accelerate workers)
+          if (/epoch is incremented/i.test(line)) continue;
 
           const isError = /error|traceback|exception/i.test(line);
           const isImportant = isError || inTraceback ||
             /loss[= ]|epoch|saving|saved|step\s+\d|finished|complete|cuda|oom|python:|workspace:|dataset:/i.test(line);
 
           if (isImportant) {
+            // Deduplicate consecutive identical pod lines (reconnect double-fire)
+            if (line === lastPodLine) continue;
+            lastPodLine = line;
             log(`[pod] ${line}`);
             if (isError) inTraceback = true;
           }
@@ -692,10 +703,10 @@ export default function RunPodLauncher() {
 
         const newContent = newLines.join("\n");
         // Stop polling on completion or fatal halt (check only new lines to avoid re-triggering)
-        if (/training (finished|complete|done)/i.test(newContent)) {
+        if (/training (finished|complete|done)|^training complete$/im.test(newContent)) {
           if (_logPollId) { clearInterval(_logPollId); _logPollId = null; }
           downloadOutputs(jUrl);
-        } else if (/ModuleNotFoundError|No module named|command not found|exit 1/i.test(newContent)) {
+        } else if (/training failed \(exit|ModuleNotFoundError|No module named|command not found/i.test(newContent)) {
           if (_logPollId) { clearInterval(_logPollId); _logPollId = null; }
           if (_podPollId) { clearInterval(_podPollId); _podPollId = null; setPolling(false); }
           log(`Training halted — see errors above.`);
@@ -1633,7 +1644,7 @@ export default function RunPodLauncher() {
                   <button className="btn-ghost" onClick={() => { navigator.clipboard.writeText(logs.join("\n")); setLogCopied(true); setTimeout(() => setLogCopied(false), 2000); }} style={{ padding: "1px 6px", fontSize: "9px", color: logCopied ? "var(--green)" : undefined }}>
                     {logCopied ? "Copied!" : "Copy"}
                   </button>
-                  <button className="btn-ghost" onClick={clearRunpodLogs} style={{ padding: "1px 6px", fontSize: "9px" }}>
+                  <button className="btn-ghost" onClick={() => { clearRunpodLogs(); log("Log cleared."); }} style={{ padding: "1px 6px", fontSize: "9px" }}>
                     Clear
                   </button>
                 </>
@@ -1645,6 +1656,25 @@ export default function RunPodLauncher() {
               )}
             </div>
             <div ref={logScrollRef} style={{ flex: 1, overflow: "auto", padding: "0 20px 16px" }}>
+              {downloadFailed && jupyterUrl && (
+                <div style={{
+                  display: "flex", alignItems: "center", gap: "10px", marginBottom: "8px",
+                  padding: "7px 10px", borderRadius: "5px",
+                  background: "rgba(212,112,112,0.08)", border: "1px solid rgba(212,112,112,0.3)",
+                }}>
+                  <AlertTriangle size={12} style={{ color: "#d47070", flexShrink: 0 }} />
+                  <span style={{ fontFamily: "var(--font-mono)", fontSize: "10px", color: "#d47070", flex: 1 }}>
+                    Download failed — training output still on pod
+                  </span>
+                  <button
+                    className="btn-ghost"
+                    style={{ padding: "3px 10px", fontSize: "10px", color: "var(--accent-bright)", borderColor: "var(--accent-dim)" }}
+                    onClick={() => downloadOutputs(jupyterUrl)}
+                  >
+                    Retry Download
+                  </button>
+                </div>
+              )}
               {trainingHalted && jupyterUrl && (
                 <div style={{
                   display: "flex", alignItems: "center", gap: "10px", marginBottom: "8px",

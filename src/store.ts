@@ -90,6 +90,8 @@ export interface AppSettings {
   uiScale: number;
   volumeContents: Record<string, VolumeContents>; // keyed by volumeId
   dockerImage: string;
+  activeTheme: string;   // built-in theme id, e.g. "default"
+  themeFile: string;     // absolute path to a custom theme JSON (empty = none)
 }
 
 export interface ProjectState {
@@ -162,6 +164,8 @@ const defaultSettings: AppSettings = {
   uiScale: 1.0,
   volumeContents: {},
   dockerImage: "ashleykza/kohya:latest",
+  activeTheme: "default",
+  themeFile: "",
 };
 
 const defaultGeneration: GenerationConfig = {
@@ -232,7 +236,7 @@ export const useStore = create<ProjectState>()(
     }),
     {
       name: "lora-studio-state",
-      version: 14,
+      version: 15,
       migrate: (persistedState: unknown, version: number) => {
         const state = persistedState as any;
         // v0: flat string fields on shot items
@@ -348,6 +352,14 @@ export const useStore = create<ProjectState>()(
         // v13→14: add optimizer field
         if (version === 13) {
           state.training = { ...state.training, optimizer: "AdamW8bit" };
+        }
+        // v14→15: add theme fields to settings
+        if (version === 14) {
+          state.settings = { ...defaultSettings, ...state.settings, activeTheme: "default", themeFile: "" };
+        }
+        // ensure theme fields always present regardless of migration path
+        if (!state.settings?.activeTheme) {
+          state.settings = { ...defaultSettings, ...state.settings, activeTheme: "default", themeFile: "" };
         }
         // ensure containerDiskInGb always present regardless of migration path
         if (!state.training?.containerDiskInGb) {

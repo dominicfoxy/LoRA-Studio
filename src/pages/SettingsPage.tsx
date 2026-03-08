@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { CheckCircle, XCircle, FolderOpen } from "lucide-react";
 import PageHeader from "../components/PageHeader";
 import { useStore } from "../store";
+import { BUILT_IN_THEMES } from "../lib/themes";
 
 type TestState = "idle" | "testing" | "ok" | "fail";
 
@@ -54,10 +55,72 @@ export default function SettingsPage() {
       <div style={{ flex: 1, overflow: "auto", padding: "28px" }}>
         <div style={{ maxWidth: "560px" }}>
 
-          {/* UI Scale */}
+          {/* Display */}
           <section style={{ marginBottom: "32px" }}>
             <div style={{ fontFamily: "var(--font-display)", fontSize: "14px", fontWeight: 700, color: "var(--text-primary)", marginBottom: "16px", paddingBottom: "8px", borderBottom: "1px solid var(--border)" }}>
               Display
+            </div>
+
+            {/* Theme */}
+            <div style={{ marginBottom: "20px" }}>
+              <div className="section-label">Theme</div>
+              <div style={{ display: "flex", gap: "6px", marginTop: "8px", flexWrap: "wrap" }}>
+                {BUILT_IN_THEMES.map((t) => {
+                  // Colorblind Friendly is an escape hatch — hardcoded colours that bypass
+                  // CSS vars so it's always findable no matter how bad the active theme is.
+                  const isSafe = t.id === "colorblind";
+                  const selected = settings.activeTheme === t.id;
+                  return (
+                    <button
+                      key={t.id}
+                      onClick={() => setSettings({ activeTheme: t.id })}
+                      style={{
+                        padding: "5px 14px",
+                        fontSize: "12px",
+                        fontFamily: "var(--font-display)",
+                        fontWeight: 600,
+                        borderRadius: "5px",
+                        cursor: "pointer",
+                        border:      isSafe ? "1px solid #3b82f6"               : selected ? "1px solid var(--accent)"      : "1px solid var(--border)",
+                        background:  isSafe ? "rgba(29, 78, 216, 0.20)"         : selected ? "var(--accent-glow)"           : "transparent",
+                        color:       isSafe ? "#93c5fd"                          : selected ? "var(--accent-bright)"         : "var(--text-secondary)",
+                      }}
+                    >
+                      {t.label}
+                    </button>
+                  );
+                })}
+              </div>
+              <div style={{ marginTop: "12px" }}>
+                <div className="section-label" style={{ marginBottom: "4px" }}>Custom theme file</div>
+                <div style={{ display: "flex", gap: "8px" }}>
+                  <input
+                    style={{ flex: 1 }}
+                    value={settings.themeFile}
+                    onChange={(e) => setSettings({ themeFile: e.target.value })}
+                    placeholder="/path/to/theme.json"
+                  />
+                  <button
+                    className="btn-ghost"
+                    onClick={async () => {
+                      const f = await invoke<string | null>("pick_file", { filterName: "JSON", extensions: ["json"] });
+                      if (f) setSettings({ themeFile: f });
+                    }}
+                    style={{ flexShrink: 0 }}
+                  >
+                    <FolderOpen size={13} style={{ display: "inline", marginRight: "5px" }} />
+                    Browse
+                  </button>
+                  {settings.themeFile && (
+                    <button className="btn-ghost" onClick={() => setSettings({ themeFile: "" })} style={{ flexShrink: 0 }}>
+                      Clear
+                    </button>
+                  )}
+                </div>
+                <div style={{ fontFamily: "var(--font-body)", fontStyle: "italic", fontSize: "11px", color: "var(--text-muted)", marginTop: "4px" }}>
+                  JSON object of CSS variable overrides, e.g. {"{"}"--accent": "#ff6600"{"}"}. Layered on top of the selected theme.
+                </div>
+              </div>
             </div>
             <div className="section-label">UI Scale</div>
             <div style={{ display: "flex", alignItems: "center", gap: "16px", marginTop: "8px" }}>
