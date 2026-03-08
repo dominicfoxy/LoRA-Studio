@@ -12,7 +12,7 @@ const Field = ({ label, hint, children }: { label: string; hint?: string; childr
   </div>
 );
 
-const DirField = ({ value, onChange, placeholder }: { value: string; onChange: (v: string) => void; placeholder: string }) => {
+const DirField = ({ value, onChange, placeholder, extra }: { value: string; onChange: (v: string) => void; placeholder: string; extra?: React.ReactNode }) => {
   const pick = async () => {
     const selected = await invoke<string | null>("pick_directory");
     if (selected) onChange(selected);
@@ -23,6 +23,7 @@ const DirField = ({ value, onChange, placeholder }: { value: string; onChange: (
       <button className="btn-ghost" onClick={pick} style={{ flexShrink: 0 }}>
         <FolderOpen size={13} style={{ display: "inline", marginRight: "5px" }} />Browse
       </button>
+      {extra}
     </div>
   );
 };
@@ -120,6 +121,9 @@ function ModelPicker({ models, value, onChange, onClear }: {
 export default function CharacterSetup() {
   const { character, setCharacter, settings, setSettings, importProject, images, updateImage, updateGeneration, clearImages, markSaved, projectLoadCount } = useStore();
   const [confirmNew, setConfirmNew] = useState(false);
+  const [notFoundDirs, setNotFoundDirs] = useState<Set<string>>(new Set());
+  const [loraCount, setLoraCount] = useState<number | null>(null);
+  const [loraScanning, setLoraScanning] = useState(false);
   const [committedTriggerWord, setCommittedTriggerWord] = useState(character.triggerWord);
   const [committedAtLoad, setCommittedAtLoad] = useState(projectLoadCount);
   const [updatingCaptions, setUpdatingCaptions] = useState(false);
@@ -236,6 +240,29 @@ export default function CharacterSetup() {
   const removeFromRecents = (outputDir: string) => {
     const recents = settings.recentProjects ?? [];
     setSettings({ recentProjects: recents.filter((r) => r.outputDir !== outputDir) });
+    setNotFoundDirs((s) => { const n = new Set(s); n.delete(outputDir); return n; });
+  };
+
+  const rescanLoras = async () => {
+    if (!character.loraDir) return;
+    setLoraScanning(true);
+    try {
+      const files = await invoke<string[]>("list_lora_files", { dir: character.loraDir });
+      setLoraCount(files.length);
+    } catch {
+      setLoraCount(null);
+    } finally {
+      setLoraScanning(false);
+    }
+  };
+
+  const loadFromRecent = async (dir: string) => {
+    const exists = await invoke<boolean>("path_exists", { path: dir });
+    if (!exists) {
+      setNotFoundDirs((s) => new Set(s).add(dir));
+      return;
+    }
+    await loadFromDir(dir);
   };
 
   const newCharacter = () => {
@@ -395,8 +422,14 @@ export default function CharacterSetup() {
             <Field label="LoRA Directory" hint="Stability Matrix LoRA folder — used by the LoRA browser on the Shot List page">
               <DirField
                 value={character.loraDir}
-                onChange={(v) => setCharacter({ loraDir: v })}
+                onChange={(v) => { setCharacter({ loraDir: v }); setLoraCount(null); }}
                 placeholder="e.g. /home/jon/StabilityMatrix/Packages/.../models/Lora"
+                extra={character.loraDir && (
+                  <button className="btn-ghost" onClick={rescanLoras} disabled={loraScanning} style={{ flexShrink: 0 }} title="Rescan LoRA directory">
+                    <RefreshCw size={13} style={{ display: "inline", marginRight: loraCount !== null ? "5px" : 0 }} />
+                    {loraScanning ? "Scanning…" : loraCount !== null ? `${loraCount} LoRAs` : ""}
+                  </button>
+                )}
               />
             </Field>
           </div>
@@ -442,10 +475,19 @@ export default function CharacterSetup() {
                         {r.outputDir}
                       </div>
                     </div>
-                    {r.outputDir !== character.outputDir && (
+                    {notFoundDirs.has(r.outputDir) ? (
+                      <div style={{ display: "flex", alignItems: "center", gap: "8px", flexShrink: 0 }}>
+                        <span style={{ fontFamily: "var(--font-mono)", fontSize: "10px", color: "var(--red)" }}>Not found</span>
+                        <button
+                          className="btn-ghost"
+                          onClick={() => removeFromRecents(r.outputDir)}
+                          style={{ padding: "4px 10px", fontSize: "11px", color: "var(--red)", flexShrink: 0 }}
+                        >Remove</button>
+                      </div>
+                    ) : r.outputDir !== character.outputDir && (
                       <button
                         className="btn-ghost"
-                        onClick={() => loadFromDir(r.outputDir)}
+                        onClick={() => loadFromRecent(r.outputDir)}
                         style={{ padding: "4px 12px", fontSize: "11px", flexShrink: 0 }}
                       >Load</button>
                     )}

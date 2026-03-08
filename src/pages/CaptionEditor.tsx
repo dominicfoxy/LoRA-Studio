@@ -18,6 +18,7 @@ export default function CaptionEditor() {
   const [filter, setFilter] = useState<FilterMode>("approved");
   const [selected, setSelected] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
   const [disabledTags, setDisabledTags] = useState<Set<string>>(new Set());
   const [tagsExpanded, setTagsExpanded] = useState(true);
 
@@ -57,9 +58,12 @@ export default function CaptionEditor() {
   const saveCaption = async (img: GeneratedImage, caption: string) => {
     const normalized = normalizeCaption(caption, character.triggerWord);
     setSaving(true);
+    setSaveError(null);
     try {
       await invoke("save_caption", { imagePath: img.path, caption: normalized });
       updateImage(img.id, { caption: normalized });
+    } catch (err) {
+      setSaveError(`Save failed: ${err}`);
     } finally {
       setSaving(false);
     }
@@ -214,6 +218,7 @@ export default function CaptionEditor() {
             triggerWord={character.triggerWord}
             onSave={saveCaption}
             saving={saving}
+            saveError={saveError}
           />
         ) : (
           <div style={{
@@ -268,11 +273,12 @@ function ThumbnailItem({ img, selected, onClick }: { img: GeneratedImage; select
   );
 }
 
-function CaptionEditorPanel({ img, triggerWord, onSave, saving }: {
+function CaptionEditorPanel({ img, triggerWord, onSave, saving, saveError }: {
   img: GeneratedImage;
   triggerWord: string;
   onSave: (img: GeneratedImage, caption: string) => void;
   saving: boolean;
+  saveError: string | null;
 }) {
   const [b64, setB64] = useState<string | null>(null);
   const [editCaption, setEditCaption] = useState(img.caption);
@@ -440,6 +446,11 @@ function CaptionEditorPanel({ img, triggerWord, onSave, saving }: {
           <Save size={12} style={{ display: "inline", marginRight: "5px" }} />
           {saving ? "Saving…" : "Save Caption"}
         </button>
+        {saveError && (
+          <div style={{ fontFamily: "var(--font-mono)", fontSize: "10px", color: "var(--red)", marginTop: "4px" }}>
+            {saveError}
+          </div>
+        )}
       </div>
     </div>
   );

@@ -95,13 +95,86 @@ function PromptTooltip({ prompt, x, y }: { prompt: string; x: number; y: number 
   );
 }
 
-// ── Image Card ────────────────────────────────────────────────────────────────
-function ImageCard({ img, onApprove, onReject, onDelete, onLightbox, onPromptHover, onPromptLeave }: {
-  img: GeneratedImage;
+// ── Preview Pane ──────────────────────────────────────────────────────────────
+function PreviewPane({ img, onApprove, onReject, onDelete, onLightbox }: {
+  img: GeneratedImage | null;
   onApprove: () => void;
   onReject: () => void;
   onDelete: () => void;
   onLightbox: (b64: string) => void;
+}) {
+  const [b64, setB64] = useState<string | null>(null);
+  const [deleting, setDeleting] = useState(false);
+
+  useEffect(() => {
+    if (!img) { setB64(null); return; }
+    setB64(null);
+    invoke<string>("read_image_b64", { path: img.path }).then(setB64).catch(() => {});
+  }, [img?.id]);
+
+  if (!img) {
+    return (
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "center", height: "100%", flexDirection: "column", gap: "10px" }}>
+        <ZoomIn size={28} color="var(--text-muted)" strokeWidth={1} />
+        <div style={{ fontFamily: "var(--font-mono)", fontSize: "10px", color: "var(--text-muted)" }}>click an image to preview</div>
+      </div>
+    );
+  }
+
+  const handleDelete = async () => {
+    setDeleting(true);
+    try { await invoke("delete_image", { path: img.path }); } catch {}
+    onDelete();
+  };
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", height: "100%", overflow: "hidden" }}>
+      {/* Image */}
+      <div
+        style={{ flex: 1, background: "var(--bg-3)", position: "relative", cursor: b64 ? "zoom-in" : "default", overflow: "hidden", minHeight: 0 }}
+        onClick={() => b64 && onLightbox(b64)}
+      >
+        {b64
+          ? <img src={`data:image/png;base64,${b64}`} style={{ width: "100%", height: "100%", objectFit: "contain", display: "block" }} />
+          : <div style={{ width: "100%", height: "100%", display: "flex", alignItems: "center", justifyContent: "center", fontFamily: "var(--font-mono)", fontSize: "10px", color: "var(--text-muted)" }}>loading…</div>
+        }
+        {b64 && (
+          <div style={{ position: "absolute", bottom: "8px", right: "8px", background: "rgba(0,0,0,0.5)", borderRadius: "3px", padding: "3px 5px", opacity: 0.7 }}>
+            <ZoomIn size={12} color="white" />
+          </div>
+        )}
+        {/* Approval badge */}
+        {img.approved === true && <div style={{ position: "absolute", top: "8px", right: "8px", background: "var(--green)", borderRadius: "50%", width: "22px", height: "22px", display: "flex", alignItems: "center", justifyContent: "center" }}><Check size={13} color="white" strokeWidth={3} /></div>}
+        {img.approved === false && <div style={{ position: "absolute", top: "8px", right: "8px", background: "var(--red)", borderRadius: "50%", width: "22px", height: "22px", display: "flex", alignItems: "center", justifyContent: "center" }}><X size={13} color="white" strokeWidth={3} /></div>}
+      </div>
+
+      {/* Caption */}
+      <div style={{ padding: "10px 14px", fontFamily: "var(--font-mono)", fontSize: "10px", color: "var(--text-muted)", lineHeight: 1.55, maxHeight: "90px", overflowY: "auto", borderTop: "1px solid var(--border)", flexShrink: 0 }}>
+        {img.caption || <span style={{ opacity: 0.5 }}>no caption</span>}
+      </div>
+
+      {/* Buttons */}
+      <div style={{ padding: "10px 14px", display: "flex", gap: "8px", borderTop: "1px solid var(--border)", flexShrink: 0 }}>
+        <button onClick={onApprove} style={{ flex: 1, padding: "8px", fontSize: "13px", background: img.approved === true ? "var(--green)" : "var(--green-dim)", border: `1px solid var(--green)`, color: img.approved === true ? "white" : "var(--green)", borderRadius: "4px", cursor: "pointer", fontFamily: "var(--font-display)", fontWeight: 700, letterSpacing: "0.05em" }}>✓ Approve</button>
+        <button onClick={onReject} style={{ flex: 1, padding: "8px", fontSize: "13px", background: img.approved === false ? "var(--red)" : "var(--red-dim)", border: `1px solid var(--red)`, color: img.approved === false ? "white" : "#d47070", borderRadius: "4px", cursor: "pointer", fontFamily: "var(--font-display)", fontWeight: 700, letterSpacing: "0.05em" }}>✗ Reject</button>
+        <button onClick={handleDelete} disabled={deleting} style={{ padding: "8px 10px", fontSize: "13px", background: "var(--bg-3)", border: "1px solid var(--border)", color: "var(--text-muted)", borderRadius: "4px", cursor: "pointer" }} title="Delete from disk">
+          <Trash2 size={13} />
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// ── Image Card ────────────────────────────────────────────────────────────────
+function ImageCard({ img, selected, focused, onSelect, onFocus, onApprove, onReject, onDelete, onPromptHover, onPromptLeave }: {
+  img: GeneratedImage;
+  selected?: boolean;
+  focused?: boolean;
+  onSelect?: (shiftKey: boolean) => void;
+  onFocus: () => void;
+  onApprove: () => void;
+  onReject: () => void;
+  onDelete: () => void;
   onPromptHover: (prompt: string, x: number, y: number) => void;
   onPromptLeave: () => void;
 }) {
@@ -127,29 +200,35 @@ function ImageCard({ img, onApprove, onReject, onDelete, onLightbox, onPromptHov
     onDelete();
   };
 
-  const border = img.approved === true ? "2px solid var(--green)"
+  const border = selected ? "2px solid var(--accent)"
+    : focused ? "2px solid var(--text-secondary)"
+    : img.approved === true ? "2px solid var(--green)"
     : img.approved === false ? "2px solid var(--red)"
     : "1px solid var(--border)";
 
   return (
     <div
-      style={{ background: "var(--bg-2)", borderRadius: "6px", border, overflow: "hidden", transition: "border 0.15s" }}
+      onClick={(e) => { if ((e.ctrlKey || e.metaKey || e.shiftKey) && onSelect) { e.stopPropagation(); onSelect(e.shiftKey); } }}
       onMouseMove={(e) => onPromptHover(img.prompt, e.clientX, e.clientY)}
       onMouseLeave={onPromptLeave}
+      style={{ background: "var(--bg-2)", borderRadius: "6px", border, overflow: "hidden", transition: "border 0.15s", cursor: "default" }}
     >
       {/* Image area */}
-      <div style={{ aspectRatio: "1", background: "var(--bg-3)", position: "relative", cursor: b64 ? "zoom-in" : "default" }}
-        onClick={() => b64 && onLightbox(b64)}>
+      <div style={{ aspectRatio: "1", background: "var(--bg-3)", position: "relative", cursor: "pointer" }}
+        onClick={(e) => { if (!e.ctrlKey && !e.metaKey && !e.shiftKey) onFocus(); }}>
         {b64
           ? <img src={`data:image/png;base64,${b64}`} style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }} />
           : <div style={{ width: "100%", height: "100%", display: "flex", alignItems: "center", justifyContent: "center", fontFamily: "var(--font-mono)", fontSize: "10px", color: "var(--text-muted)" }}>
               {loading ? "loading…" : ""}
             </div>
         }
-        {/* Zoom hint */}
-        {b64 && (
-          <div style={{ position: "absolute", bottom: "6px", right: "6px", background: "rgba(0,0,0,0.5)", borderRadius: "3px", padding: "2px 4px", opacity: 0.7 }}>
-            <ZoomIn size={11} color="white" />
+        {/* Selection checkbox */}
+        {onSelect && (
+          <div
+            onClick={(e) => { e.stopPropagation(); onSelect(e.shiftKey); }}
+            style={{ position: "absolute", top: "6px", left: "6px", width: "16px", height: "16px", borderRadius: "3px", background: selected ? "var(--accent)" : "rgba(0,0,0,0.45)", border: `1px solid ${selected ? "var(--accent)" : "rgba(255,255,255,0.25)"}`, display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", flexShrink: 0 }}
+          >
+            {selected && <Check size={10} color="white" strokeWidth={3} />}
           </div>
         )}
         {/* Approval badge */}
@@ -190,6 +269,11 @@ export default function BatchGenerator() {
   const [approvedExpanded, setApprovedExpanded] = useState(false);
   const [autoRequeue, setAutoRequeue] = useState(false);
   const [tooltip, setTooltip] = useState<{ prompt: string; x: number; y: number } | null>(null);
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [lastSelectedId, setLastSelectedId] = useState<string | null>(null);
+  const [imageProgress, setImageProgress] = useState(0);
+  const [focusedId, setFocusedId] = useState<string | null>(null);
+  const focusedImg = images.find((i) => i.id === focusedId) ?? null;
 
   const pending = images.filter((i) => i.approved === null);
   const approved = images.filter((i) => i.approved === true);
@@ -211,38 +295,51 @@ export default function BatchGenerator() {
       const seed = Math.floor(Math.random() * 2147483647);
 
       try {
-        const result = await invoke<{ images: string[] }>("forge_txt2img", {
-          baseUrl: settings.forgeUrl,
-          params: {
-            prompt,
-            negative_prompt: ["lowres, bad anatomy, bad hands, missing fingers, cropped, worst quality, low quality, jpeg artifacts, signature, watermark, blurry", ...generation.negativeEmbeddings].join(", "),
-            steps: generation.steps,
-            cfg_scale: generation.cfgScale,
-            width,
-            height,
-            sampler_name: generation.samplerName,
-            scheduler: generation.scheduler || undefined,
-            seed,
-            batch_size: 1,
-            ...(character.baseModel ? { override_settings: { sd_model_checkpoint: character.baseModel } } : {}),
-          },
-        });
+        const progressPoll = setInterval(async () => {
+          try {
+            const p = await invoke<{ progress: number }>("forge_get_progress", { baseUrl: settings.forgeUrl });
+            setImageProgress(Math.min(1, p.progress ?? 0));
+          } catch {}
+        }, 800);
 
-        const imageBytes = base64ToBytes(result.images[0]);
-        const imageId = `${Date.now()}_${seed}`;
-        const imagePath = `${character.outputDir}/${imageId}.png`;
-        await invoke("save_image_bytes", { path: imagePath, data: Array.from(imageBytes) });
-        const caption = deriveCaption(prompt, character.triggerWord, {
-          species: character.species,
-          baseDescription: character.baseDescription,
-          artistTags: character.artistTags,
-        });
-        await invoke("save_caption", { imagePath, caption });
-        addImage({ id: imageId, shotId, path: imagePath, prompt, caption, approved: null, seed, width, height });
-        // If this was a requeue, delete the old file and remove it from store now that replacement succeeded
-        if (sourceImageId && sourceImagePath) {
-          try { await invoke("delete_image", { path: sourceImagePath }); } catch {}
-          removeImage(sourceImageId);
+        try {
+          const result = await invoke<{ images: string[] }>("forge_txt2img", {
+            baseUrl: settings.forgeUrl,
+            params: {
+              prompt,
+              negative_prompt: ["lowres, bad anatomy, bad hands, missing fingers, cropped, worst quality, low quality, jpeg artifacts, signature, watermark, blurry", ...generation.negativeEmbeddings].join(", "),
+              steps: generation.steps,
+              cfg_scale: generation.cfgScale,
+              width,
+              height,
+              sampler_name: generation.samplerName,
+              scheduler: generation.scheduler || undefined,
+              seed,
+              batch_size: 1,
+              ...(character.baseModel ? { override_settings: { sd_model_checkpoint: character.baseModel } } : {}),
+            },
+          });
+
+          const imageBytes = base64ToBytes(result.images[0]);
+          const imageId = `${Date.now()}_${seed}`;
+          const imagePath = `${character.outputDir}/${imageId}.png`;
+          await invoke("save_image_bytes", { path: imagePath, data: Array.from(imageBytes) });
+          const caption = deriveCaption(prompt, character.triggerWord, {
+            species: character.species,
+            baseDescription: character.baseDescription,
+            artistTags: character.artistTags,
+          });
+          await invoke("save_caption", { imagePath, caption });
+          addImage({ id: imageId, shotId, path: imagePath, prompt, caption, approved: null, seed, width, height });
+          // If this was a requeue, delete the old file and remove it from store now that replacement succeeded
+          if (sourceImageId && sourceImagePath) {
+            try { await invoke("delete_image", { path: sourceImagePath }); } catch {}
+            removeImage(sourceImageId);
+            setSelectedIds((prev) => { const n = new Set(prev); n.delete(sourceImageId); return n; });
+          }
+        } finally {
+          clearInterval(progressPoll);
+          setImageProgress(0);
         }
       } catch (err) {
         setLastError(humanizeError(err));
@@ -343,6 +440,48 @@ export default function BatchGenerator() {
     generateAll();
   };
 
+  const displayedGrid = [...pending, ...rejected];
+
+  const handleSelect = (id: string, shiftKey: boolean) => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (shiftKey && lastSelectedId) {
+        const fromIdx = displayedGrid.findIndex((img) => img.id === lastSelectedId);
+        const toIdx = displayedGrid.findIndex((img) => img.id === id);
+        if (fromIdx !== -1 && toIdx !== -1) {
+          const [start, end] = fromIdx < toIdx ? [fromIdx, toIdx] : [toIdx, fromIdx];
+          for (let i = start; i <= end; i++) next.add(displayedGrid[i].id);
+          return next;
+        }
+      }
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+    if (!shiftKey) setLastSelectedId(id);
+  };
+
+  const bulkApprove = () => {
+    selectedIds.forEach((id) => updateImage(id, { approved: true }));
+    setSelectedIds(new Set());
+  };
+
+  const bulkReject = () => {
+    selectedIds.forEach((id) => updateImage(id, { approved: false }));
+    setSelectedIds(new Set());
+  };
+
+  const getNextPendingId = (currentId: string): string | null => {
+    const grid = [...images.filter(i => i.approved === null), ...images.filter(i => i.approved === false)];
+    const currentIdx = grid.findIndex(i => i.id === currentId);
+    for (let i = currentIdx + 1; i < grid.length; i++) {
+      if (grid[i].approved === null) return grid[i].id;
+    }
+    for (let i = 0; i < currentIdx; i++) {
+      if (grid[i].approved === null) return grid[i].id;
+    }
+    return null;
+  };
+
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100%" }}>
       {lightboxB64 && <Lightbox b64={lightboxB64} onClose={() => setLightboxB64(null)} />}
@@ -402,6 +541,14 @@ export default function BatchGenerator() {
               Auto-requeue
             </button>
 
+            {selectedIds.size > 0 && (
+              <>
+                <span style={{ fontFamily: "var(--font-mono)", fontSize: "10px", color: "var(--accent-bright)" }}>{selectedIds.size} selected</span>
+                <button className="btn-ghost" onClick={bulkApprove} style={{ padding: "4px 10px", fontSize: "10px", color: "var(--green)", borderColor: "var(--green)" }}>✓ Approve all</button>
+                <button className="btn-ghost" onClick={bulkReject} style={{ padding: "4px 10px", fontSize: "10px", color: "var(--red)", borderColor: "var(--red)" }}>✗ Reject all</button>
+                <button className="btn-ghost" onClick={() => setSelectedIds(new Set())} style={{ padding: "4px 10px", fontSize: "10px" }}>Clear</button>
+              </>
+            )}
             {images.length > 0 && !generationRunning && (
               <button className="btn-danger" onClick={() => setConfirmPurge(true)} style={{ opacity: 0.8 }}>
                 <Trash2 size={12} style={{ display: "inline", marginRight: "5px" }} />
@@ -438,6 +585,15 @@ export default function BatchGenerator() {
               <div style={{ width: `${(generationProgress.current / generationProgress.total) * 100}%`, height: "100%", background: "var(--accent)", transition: "width 0.3s" }} />
             </div>
           </div>
+          {imageProgress > 0 && (
+            <div style={{ display: "flex", alignItems: "center", gap: "8px", paddingLeft: "24px", marginBottom: "4px" }}>
+              <span style={{ fontFamily: "var(--font-mono)", fontSize: "9px", color: "var(--accent-bright)", opacity: 0.6, flexShrink: 0 }}>image</span>
+              <div style={{ width: "200px", height: "2px", background: "var(--bg-3)", borderRadius: "1px", overflow: "hidden", flexShrink: 0 }}>
+                <div style={{ width: `${imageProgress * 100}%`, height: "100%", background: "var(--accent-bright)", transition: "width 0.6s" }} />
+              </div>
+              <span style={{ fontFamily: "var(--font-mono)", fontSize: "9px", color: "var(--accent-bright)", opacity: 0.6 }}>{Math.round(imageProgress * 100)}%</span>
+            </div>
+          )}
           <div style={{ fontFamily: "var(--font-mono)", fontSize: "10px", color: "var(--accent-bright)", opacity: 0.75, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", paddingLeft: "24px" }}>
             {generationCurrentJob}
           </div>
@@ -511,7 +667,8 @@ export default function BatchGenerator() {
         ))}
       </div>
 
-      <div style={{ flex: 1, overflow: "auto", padding: "20px 28px" }}>
+      <div style={{ flex: 1, overflow: "hidden", display: "flex", minHeight: 0 }}>
+      <div style={{ flex: 1, overflow: "auto", padding: "20px 16px 20px 28px" }}>
         {/* Pending + rejected grid */}
         {[...pending, ...rejected].length === 0 && approved.length === 0 ? (
           <div style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", height: "300px", gap: "12px" }}>
@@ -521,12 +678,20 @@ export default function BatchGenerator() {
           </div>
         ) : (
           <>
-            {[...pending, ...rejected].length > 0 && (
+            {displayedGrid.length > 0 && (
               <div style={{ display: "grid", gridTemplateColumns: `repeat(auto-fill, minmax(${thumbSize}px, 1fr))`, gap: "12px" }}>
-                {[...pending, ...rejected].map((img) => (
+                {displayedGrid.map((img) => (
                   <ImageCard key={img.id} img={img}
-                    onApprove={() => updateImage(img.id, { approved: true })}
+                    selected={selectedIds.has(img.id)}
+                    focused={focusedId === img.id}
+                    onSelect={(shiftKey) => handleSelect(img.id, shiftKey)}
+                    onFocus={() => setFocusedId(img.id)}
+                    onApprove={() => {
+                      if (selectedIds.has(img.id)) { bulkApprove(); return; }
+                      updateImage(img.id, { approved: true });
+                    }}
                     onReject={() => {
+                      if (selectedIds.has(img.id)) { bulkReject(); return; }
                       updateImage(img.id, { approved: false });
                       if (autoRequeue && img.approved !== false) {
                         const job = { prompt: img.prompt, shotId: img.shotId, width: img.width ?? generation.width, height: img.height ?? generation.height, sourceImageId: img.id, sourceImagePath: img.path };
@@ -537,8 +702,7 @@ export default function BatchGenerator() {
                         }
                       }
                     }}
-                    onDelete={() => removeImage(img.id)}
-                    onLightbox={setLightboxB64}
+                    onDelete={() => { removeImage(img.id); if (focusedId === img.id) setFocusedId(null); }}
                     onPromptHover={(prompt, x, y) => setTooltip({ prompt, x, y })}
                     onPromptLeave={() => setTooltip(null)}
                   />
@@ -573,6 +737,8 @@ export default function BatchGenerator() {
                     <div style={{ display: "grid", gridTemplateColumns: `repeat(auto-fill, minmax(${Math.max(120, thumbSize - 60)}px, 1fr))`, gap: "8px" }}>
                       {approved.map((img) => (
                         <ImageCard key={img.id} img={img}
+                          focused={focusedId === img.id}
+                          onFocus={() => setFocusedId(img.id)}
                           onApprove={() => updateImage(img.id, { approved: true })}
                           onReject={() => {
                             updateImage(img.id, { approved: false });
@@ -585,8 +751,7 @@ export default function BatchGenerator() {
                               }
                             }
                           }}
-                          onDelete={() => removeImage(img.id)}
-                          onLightbox={setLightboxB64}
+                          onDelete={() => { removeImage(img.id); if (focusedId === img.id) setFocusedId(null); }}
                           onPromptHover={(prompt, x, y) => setTooltip({ prompt, x, y })}
                           onPromptLeave={() => setTooltip(null)}
                         />
@@ -598,6 +763,33 @@ export default function BatchGenerator() {
             )}
           </>
         )}
+      </div>
+
+      {/* Preview pane */}
+      <div style={{ flex: "0 0 30%", minWidth: "260px", maxWidth: "520px", borderLeft: "1px solid var(--border)", display: "flex", flexDirection: "column" }}>
+        <PreviewPane
+          img={focusedImg}
+          onApprove={() => {
+            if (!focusedImg) return;
+            const next = getNextPendingId(focusedImg.id);
+            updateImage(focusedImg.id, { approved: true });
+            setFocusedId(next);
+          }}
+          onReject={() => {
+            if (!focusedImg) return;
+            const next = getNextPendingId(focusedImg.id);
+            updateImage(focusedImg.id, { approved: false });
+            setFocusedId(next);
+            if (autoRequeue) {
+              const job = { prompt: focusedImg.prompt, shotId: focusedImg.shotId, width: focusedImg.width ?? generation.width, height: focusedImg.height ?? generation.height, sourceImageId: focusedImg.id, sourceImagePath: focusedImg.path };
+              if (liveQueueRef.current) liveQueueRef.current.push(job); else runGeneration([job]);
+            }
+          }}
+          onDelete={() => { if (focusedImg) { removeImage(focusedImg.id); setFocusedId(null); } }}
+          onLightbox={setLightboxB64}
+        />
+      </div>
+
       </div>
       <style>{`@keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }`}</style>
     </div>

@@ -176,13 +176,13 @@ export async function listPods(apiKey: string): Promise<Pod[]> {
 }
 
 // GPU recommendations for Kohya SDXL LoRA training
-// stepsPerSec: approximate throughput — TODO: recalibrate from real observations
+// stepsPerSec: real-world throughput at 1024px SDXL (L40S confirmed at 0.4; others scaled proportionally)
 export const RECOMMENDED_GPUS = [
-  { id: "NVIDIA A100 80GB PCIe",    label: "A100 80GB",      vram: 80, stepsPerSec: 3.2 },
-  { id: "NVIDIA A100-SXM4-40GB",   label: "A100 40GB",      vram: 40, stepsPerSec: 2.8 },
-  { id: "NVIDIA RTX A6000",         label: "RTX A6000 48GB", vram: 48, stepsPerSec: 1.8 },
-  { id: "NVIDIA L40S",              label: "L40S 48GB",       vram: 48, stepsPerSec: 1.8 },
-  { id: "NVIDIA GeForce RTX 3090",  label: "RTX 3090 24GB",  vram: 24, stepsPerSec: 1.0 },
+  { id: "NVIDIA A100 80GB PCIe",    label: "A100 80GB",      vram: 80, stepsPerSec: 0.70 },
+  { id: "NVIDIA A100-SXM4-40GB",   label: "A100 40GB",      vram: 40, stepsPerSec: 0.55 },
+  { id: "NVIDIA RTX A6000",         label: "RTX A6000 48GB", vram: 48, stepsPerSec: 0.40 },
+  { id: "NVIDIA L40S",              label: "L40S 48GB",       vram: 48, stepsPerSec: 0.40 },
+  { id: "NVIDIA GeForce RTX 3090",  label: "RTX 3090 24GB",  vram: 24, stepsPerSec: 0.20 },
 ];
 
 export interface GpuTrainingFlags {
@@ -193,12 +193,15 @@ export interface GpuTrainingFlags {
 
 // Returns optimal training flags for the available VRAM.
 // Higher VRAM → larger batch, skip gradient checkpointing, cache latents.
-export function gpuTrainingFlags(vramGb: number): GpuTrainingFlags {
-  if (vramGb >= 80) return { batchSize: 4, gradientCheckpointing: false, cacheLatents: true };
-  if (vramGb >= 48) return { batchSize: 2, gradientCheckpointing: false, cacheLatents: true };
-  if (vramGb >= 40) return { batchSize: 2, gradientCheckpointing: true,  cacheLatents: true };
-  if (vramGb >= 20) return { batchSize: 1, gradientCheckpointing: true,  cacheLatents: true };
-  return                    { batchSize: 1, gradientCheckpointing: true,  cacheLatents: false };
+// Adaptive optimizers (Prodigy, DAdaptAdam) store many float32 state tensors per parameter
+// and use significantly more VRAM than AdamW8bit — reduce batch size one tier for them.
+export function gpuTrainingFlags(vramGb: number, optimizer?: string): GpuTrainingFlags {
+  const adaptive = optimizer === "Prodigy" || optimizer === "DAdaptAdam";
+  if (vramGb >= 80) return { batchSize: adaptive ? 2 : 4, gradientCheckpointing: false, cacheLatents: true };
+  if (vramGb >= 48) return { batchSize: adaptive ? 1 : 2, gradientCheckpointing: false, cacheLatents: true };
+  if (vramGb >= 40) return { batchSize: 1,                gradientCheckpointing: true,  cacheLatents: true };
+  if (vramGb >= 20) return { batchSize: 1,                gradientCheckpointing: true,  cacheLatents: true };
+  return                    { batchSize: 1,                gradientCheckpointing: true,  cacheLatents: false };
 }
 
 // Kohya training pod template

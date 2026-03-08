@@ -78,6 +78,7 @@ export interface TrainingConfig {
   baseModelDownloadUrl: string;
   containerDiskInGb: number;
   sdxl: boolean;
+  optimizer: "AdamW8bit" | "Prodigy" | "DAdaptAdam";
 }
 
 export interface AppSettings {
@@ -149,6 +150,7 @@ const defaultTraining: TrainingConfig = {
   baseModelDownloadUrl: "",
   containerDiskInGb: 40,
   sdxl: true,
+  optimizer: "AdamW8bit",
 };
 
 const defaultSettings: AppSettings = {
@@ -214,7 +216,7 @@ export const useStore = create<ProjectState>()(
 
       addImage: (img) => set((s) => ({ images: [...s.images, img] })),
       updateImage: (id, patch) =>
-        set((s) => ({ images: s.images.map((im) => (im.id === id ? { ...im, ...patch } : im)) })),
+        set((s) => ({ images: s.images.map((im) => (im.id === id ? { ...im, ...patch } : im)), isDirty: true })),
       removeImage: (id) => set((s) => ({ images: s.images.filter((im) => im.id !== id) })),
       clearImages: () => set({ images: [] }),
 
@@ -230,7 +232,7 @@ export const useStore = create<ProjectState>()(
     }),
     {
       name: "lora-studio-state",
-      version: 13,
+      version: 14,
       migrate: (persistedState: unknown, version: number) => {
         const state = persistedState as any;
         // v0: flat string fields on shot items
@@ -343,6 +345,10 @@ export const useStore = create<ProjectState>()(
         if (version === 12) {
           state.training = { ...defaultTraining, ...state.training, steps: 1500, networkDim: 64 };
         }
+        // v13→14: add optimizer field
+        if (version === 13) {
+          state.training = { ...state.training, optimizer: "AdamW8bit" };
+        }
         // ensure containerDiskInGb always present regardless of migration path
         if (!state.training?.containerDiskInGb) {
           state.training = { ...defaultTraining, ...state.training, containerDiskInGb: defaultTraining.containerDiskInGb };
@@ -350,6 +356,10 @@ export const useStore = create<ProjectState>()(
         // ensure sdxl always present regardless of migration path
         if (state.training?.sdxl === undefined) {
           state.training = { ...defaultTraining, ...state.training, sdxl: true };
+        }
+        // ensure optimizer always present regardless of migration path
+        if (!state.training?.optimizer) {
+          state.training = { ...defaultTraining, ...state.training, optimizer: "AdamW8bit" };
         }
         return state;
       },
