@@ -41,6 +41,19 @@ export default function CaptionEditor() {
     return new Map([...freq.entries()].sort((a, b) => b[1] - a[1]));
   }, [filtered.map((i) => i.caption).join("|")]);
 
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
+      if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
+      const idx = filtered.findIndex((i) => i.id === selectedImg?.id);
+      if (idx === -1) return;
+      const next = e.key === "ArrowLeft" ? filtered[idx - 1] : filtered[idx + 1];
+      if (next) setSelected(next.id);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [filtered, selectedImg]);
+
   const toggleTag = (tag: string) => {
     setDisabledTags((prev) => {
       const next = new Set(prev);

@@ -210,8 +210,8 @@ export default function RunPodLauncher() {
         }).then((content) => {
           if (content.trim()) {
             if (content.includes("training complete")) {
-              log(`Training already completed — ready to download.`);
-              setPhase("done");
+              log(`Training already completed — starting download…`);
+              downloadOutputs(runpodActiveJupyterUrl);
             } else if (content.includes("training failed")) {
               log(`Training previously failed — see pod logs. Use Retry to relaunch or Terminate to stop billing.`);
               setTrainingHalted(true);
@@ -469,7 +469,7 @@ export default function RunPodLauncher() {
     const cacheLatentsFlag = gpuFlags.cacheLatents ? "--cache_latents" : "";
     log(`[info] accelerate launch ${trainScript} --optimizer_type ${config.optimizer} --max_train_steps ${config.steps} --network_dim ${config.networkDim} --network_alpha ${networkAlpha}`);
     await jupyterRunCommand(jUrl, JUPYTER_PASS,
-      `nohup bash -c '> /workspace/training.log; SCRIPT=\$(find /workspace -maxdepth 5 -name "${trainScript}" 2>/dev/null | head -1); if [ -z "\$SCRIPT" ]; then echo "ERROR: ${trainScript} not found" >> /workspace/training.log; exit 1; fi; PYTHON=""; for P in /venv/bin/python3 /venv/bin/python /opt/conda/bin/python3 /workspace/venv/bin/python3 /workspace/venv/bin/python /usr/local/bin/python3; do if [ -f "\$P" ] && "\$P" -c "import accelerate" 2>/dev/null; then PYTHON="\$P"; break; fi; done; if [ -z "\$PYTHON" ]; then echo "ERROR: no Python with accelerate found" >> /workspace/training.log; exit 1; fi; ACCEL=\$(dirname "\$PYTHON")/accelerate; mkdir -p /workspace/output; echo "launcher: \$ACCEL" >> /workspace/training.log; export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True; cd "\$(dirname "\$SCRIPT")" && "\$ACCEL" launch --num_cpu_threads_per_process 1 "\$SCRIPT" --dataset_config /workspace/kohya_config.toml --pretrained_model_name_or_path /workspace/models/${modelBaseName} --output_dir /workspace/output --output_name ${character.triggerWord}_lora --save_model_as safetensors --max_train_steps ${config.steps} --learning_rate ${lr} --lr_scheduler ${lrScheduler} ${lrWarmupFlag} --optimizer_type ${config.optimizer} ${optimizerArgs} --network_module networks.lora --network_dim ${config.networkDim} --network_alpha ${networkAlpha} --min_snr_gamma 5 --noise_offset 0.05 --mixed_precision fp16 --save_precision fp16 ${gradCkptFlag} ${cacheLatentsFlag} --save_every_n_steps ${saveEveryNSteps} >> /workspace/training.log 2>&1; EXIT_CODE=\$?; if [ \$EXIT_CODE -eq 0 ]; then echo "training complete" >> /workspace/training.log; else echo "training failed (exit \$EXIT_CODE)" >> /workspace/training.log; fi' &`
+      `nohup bash -c '> /workspace/training.log; SCRIPT=\$(find /workspace -maxdepth 5 -name "${trainScript}" 2>/dev/null | head -1); if [ -z "\$SCRIPT" ]; then echo "ERROR: ${trainScript} not found" >> /workspace/training.log; exit 1; fi; PYTHON=""; for P in /venv/bin/python3 /venv/bin/python /opt/conda/bin/python3 /workspace/venv/bin/python3 /workspace/venv/bin/python /usr/local/bin/python3; do if [ -f "\$P" ] && "\$P" -c "import accelerate" 2>/dev/null; then PYTHON="\$P"; break; fi; done; if [ -z "\$PYTHON" ]; then echo "ERROR: no Python with accelerate found" >> /workspace/training.log; exit 1; fi; ACCEL=\$(dirname "\$PYTHON")/accelerate; mkdir -p /workspace/output; echo "launcher: \$ACCEL" >> /workspace/training.log; export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True; cd "\$(dirname "\$SCRIPT")" && "\$ACCEL" launch --num_cpu_threads_per_process 1 "\$SCRIPT" --dataset_config /workspace/kohya_config.toml --pretrained_model_name_or_path /workspace/models/${modelBaseName} --output_dir /workspace/output --output_name ${character.triggerWord}_lora --save_model_as safetensors --max_train_steps ${config.steps} --learning_rate ${lr} --lr_scheduler ${lrScheduler} ${lrWarmupFlag} --optimizer_type ${config.optimizer} ${optimizerArgs} --network_module networks.lora --network_dim ${config.networkDim} --network_alpha ${networkAlpha} --min_snr_gamma 5 --noise_offset 0.1 --mixed_precision fp16 --save_precision fp16 ${gradCkptFlag} ${cacheLatentsFlag} --save_every_n_steps ${saveEveryNSteps} >> /workspace/training.log 2>&1; EXIT_CODE=\$?; echo "training complete" >> /workspace/training.log; if [ \$EXIT_CODE -ne 0 ]; then echo "training failed (exit \$EXIT_CODE)" >> /workspace/training.log; fi' &`
     );
     setPipelineStep(3);
     setTrainingHalted(false);
@@ -698,7 +698,7 @@ export default function RunPodLauncher() {
 
           const isError = /error|traceback|exception/i.test(line);
           const isImportant = isError || inTraceback ||
-            /loss[= ]|epoch|saving|saved|step\s+\d|finished|complete|cuda|oom|python:|workspace:|dataset:/i.test(line);
+            /loss[= ]|epoch|saving|saved|step\s+\d|finished|complete|failed|cuda|oom|python:|workspace:|dataset:/i.test(line);
 
           if (isImportant) {
             // Deduplicate consecutive identical pod lines (reconnect double-fire)

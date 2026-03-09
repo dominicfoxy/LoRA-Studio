@@ -2,8 +2,8 @@
 
 ## Untested / Needs Verification
 - [ ] **RunPod launcher end-to-end re-test required** — the reconnect/resume flow, Jupyter wait, duplicate-upload guards, and retry-on-failure path have all been significantly reworked since the confirmed wet-run. A full pass from pod launch through training completion and LoRA download needs to be verified again.
-  - **Live-run completion**: `startLogPolling` already triggers `downloadOutputs` automatically on detecting "training complete" in the log — should work.
-  - **Reconnect-after-completion**: reconnect now reads `training.log` and branches on "training complete" (→ sets phase "done", logs "ready to download") vs "training failed" (→ shows Retry banner) vs still-running (→ resumes log tail). Previously it blindly resumed log polling regardless of completion state. However: on the "training complete" reconnect path, `downloadOutputs` is NOT auto-triggered — the user currently has to find and click "Retry Download" manually. This may need a dedicated "Download LoRA" button in the done phase.
+  - **Live-run completion**: Fixed — bash script now always writes "training complete" after accelerate exits (regardless of exit code), so the detection reliably fires even when Kohya/accelerate returns non-zero on success. Previously a non-zero exit would write "training failed" and halt the UI silently (the "training failed" line was filtered from the log panel).
+  - **Reconnect-after-completion**: Fixed — reconnect now calls `downloadOutputs(runpodActiveJupyterUrl)` directly instead of just `setPhase("done")`. Auto-download now triggers on reconnect.
   - **Reconnect-before-training-starts**: if `training.log` is missing, falls through to `checkAndResume` which checks marker files and decides whether to re-upload or just relaunch training.
 
 ## Planned Features
@@ -13,11 +13,11 @@
 
 ### Batch Generator
 - [ ] Auto-select "All Combos" mode by default if the user hasn't explicitly chosen a mode (i.e. new character / fresh state)
-- [ ] Random mode ignores `randomCount` and generates all combos — the slice condition `combos.length > randomCount` silently skips when combos ≤ randomCount; investigate and fix so the field actually limits output
+- [x] Random mode ignores `randomCount` when combos ≤ randomCount — removed the `combos.length > randomCount` guard so shuffle+slice always runs in random mode
 
 ### Caption Editor
 - [ ] Import images from an existing folder — load externally sourced or manually created images into the caption workflow without going through the generator
-- [ ] Keyboard navigation between images (arrow keys)
+- [x] Keyboard navigation between images (arrow keys) — left/right arrows, skips when focus is in an input/textarea
 
 ### UX Pattern: Live Status Mirror
 - [ ] Anywhere there's a log panel monitoring an ongoing process, show a persistent "currently doing X" status line above the log (see `uploadStatus` in RunPodLauncher — updates to reflect current step with elapsed time e.g. `Extracting dataset… (10s)`). Candidates: Batch Generator progress label, Caption Editor save-all feedback.
@@ -36,7 +36,7 @@
 
 ### General
 - [ ] Character preset gallery — save and reload full character configs (separate from project save), useful for switching between characters quickly
-- [ ] Prompting inserts the training keyword into the generate prompt pointlessly. It shouldn't do that.
+- [x] Prompting inserts the training keyword into the generate prompt pointlessly — removed `character.triggerWord` from `buildFullPrompt` in BatchGenerator (trigger word has no meaning in the base model before the LoRA is trained)
 - [ ] **Fox's Automatic Braindead Character Describer (ABCD)** — AI-assisted tool to auto-generate the core description, artist tags, and trigger word from a reference image or text prompt
 - [ ] checkpoint local directory field on runpod tab autofills with an incorrect value
 - [ ] pricing on Runpod launcher page are inconsistent. Best value, price per hour, reported price on pod status marker, and price reported in the log don't match each other

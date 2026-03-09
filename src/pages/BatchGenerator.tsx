@@ -20,12 +20,11 @@ function humanizeError(err: unknown): string {
 }
 
 function buildFullPrompt(
-  character: { triggerWord: string; species: string; baseDescription: string; artistTags: string },
+  character: { species: string; baseDescription: string; artistTags: string },
   combo: { pose: PoseEntry; outfit: OutfitEntry; expression: string; background: string; extras: string; loras: string[] },
   positiveEmbeddings: string[]
 ) {
   return [
-    character.triggerWord,
     character.species,
     character.baseDescription,
     character.artistTags ? `style of ${character.artistTags}` : "",
@@ -369,7 +368,7 @@ export default function BatchGenerator() {
       )
     );
 
-    if (generation.genMode === "random" && combos.length > generation.randomCount) {
+    if (generation.genMode === "random") {
       for (let i = combos.length - 1; i > 0; i--) {
         const j = Math.floor(Math.random() * (i + 1));
         [combos[i], combos[j]] = [combos[j], combos[i]];
