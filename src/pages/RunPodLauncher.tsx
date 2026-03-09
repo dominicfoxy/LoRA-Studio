@@ -209,8 +209,16 @@ export default function RunPodLauncher() {
           remotePath: "workspace/training.log",
         }).then((content) => {
           if (content.trim()) {
-            log(`Training already running — resuming log tail…`);
-            startLogPolling(runpodActiveJupyterUrl, content.split("\n").length);
+            if (content.includes("training complete")) {
+              log(`Training already completed — ready to download.`);
+              setPhase("done");
+            } else if (content.includes("training failed")) {
+              log(`Training previously failed — see pod logs. Use Retry to relaunch or Terminate to stop billing.`);
+              setTrainingHalted(true);
+            } else {
+              log(`Training already running — resuming log tail…`);
+              startLogPolling(runpodActiveJupyterUrl, content.split("\n").length);
+            }
           } else {
             log(`Training log empty — restarting upload…`);
             uploadToVolume(runpodActiveJupyterUrl);
@@ -1656,44 +1664,6 @@ export default function RunPodLauncher() {
               )}
             </div>
             <div ref={logScrollRef} style={{ flex: 1, overflow: "auto", padding: "0 20px 16px" }}>
-              {downloadFailed && jupyterUrl && (
-                <div style={{
-                  display: "flex", alignItems: "center", gap: "10px", marginBottom: "8px",
-                  padding: "7px 10px", borderRadius: "5px",
-                  background: "rgba(212,112,112,0.08)", border: "1px solid rgba(212,112,112,0.3)",
-                }}>
-                  <AlertTriangle size={12} style={{ color: "#d47070", flexShrink: 0 }} />
-                  <span style={{ fontFamily: "var(--font-mono)", fontSize: "10px", color: "#d47070", flex: 1 }}>
-                    Download failed — training output still on pod
-                  </span>
-                  <button
-                    className="btn-ghost"
-                    style={{ padding: "3px 10px", fontSize: "10px", color: "var(--accent-bright)", borderColor: "var(--accent-dim)" }}
-                    onClick={() => downloadOutputs(jupyterUrl)}
-                  >
-                    Retry Download
-                  </button>
-                </div>
-              )}
-              {trainingHalted && jupyterUrl && (
-                <div style={{
-                  display: "flex", alignItems: "center", gap: "10px", marginBottom: "8px",
-                  padding: "7px 10px", borderRadius: "5px",
-                  background: "rgba(212,112,112,0.08)", border: "1px solid rgba(212,112,112,0.3)",
-                }}>
-                  <AlertTriangle size={12} style={{ color: "#d47070", flexShrink: 0 }} />
-                  <span style={{ fontFamily: "var(--font-mono)", fontSize: "10px", color: "#d47070", flex: 1 }}>
-                    Training halted
-                  </span>
-                  <button
-                    className="btn-ghost"
-                    style={{ padding: "3px 10px", fontSize: "10px", color: "var(--accent-bright)", borderColor: "var(--accent-dim)" }}
-                    onClick={() => { setTrainingHalted(false); checkAndResume(jupyterUrl); startPolling(pod?.id ?? ""); }}
-                  >
-                    Retry
-                  </button>
-                </div>
-              )}
               {uploadStatus && (
                 <div style={{ color: "var(--accent-bright)", display: "flex", alignItems: "center", gap: "8px", marginBottom: "6px" }}>
                   <RefreshCw size={10} style={{ animation: "spin 1s linear infinite", flexShrink: 0 }} />
@@ -1712,6 +1682,48 @@ export default function RunPodLauncher() {
                   {line || <br />}
                 </div>
               ))}
+              {downloadFailed && jupyterUrl && (
+                <div style={{
+                  display: "flex", alignItems: "center", gap: "10px", marginTop: "8px",
+                  padding: "7px 10px", borderRadius: "5px",
+                  position: "sticky", bottom: 0,
+                  background: "rgba(212,112,112,0.12)", border: "1px solid rgba(212,112,112,0.3)",
+                  backdropFilter: "blur(4px)",
+                }}>
+                  <AlertTriangle size={12} style={{ color: "#d47070", flexShrink: 0 }} />
+                  <span style={{ fontFamily: "var(--font-mono)", fontSize: "10px", color: "#d47070", flex: 1 }}>
+                    Download failed — training output still on pod
+                  </span>
+                  <button
+                    className="btn-ghost"
+                    style={{ padding: "3px 10px", fontSize: "10px", color: "var(--accent-bright)", borderColor: "var(--accent-dim)" }}
+                    onClick={() => downloadOutputs(jupyterUrl)}
+                  >
+                    Retry Download
+                  </button>
+                </div>
+              )}
+              {trainingHalted && jupyterUrl && (
+                <div style={{
+                  display: "flex", alignItems: "center", gap: "10px", marginTop: "8px",
+                  padding: "7px 10px", borderRadius: "5px",
+                  position: "sticky", bottom: 0,
+                  background: "rgba(212,112,112,0.12)", border: "1px solid rgba(212,112,112,0.3)",
+                  backdropFilter: "blur(4px)",
+                }}>
+                  <AlertTriangle size={12} style={{ color: "#d47070", flexShrink: 0 }} />
+                  <span style={{ fontFamily: "var(--font-mono)", fontSize: "10px", color: "#d47070", flex: 1 }}>
+                    Training halted
+                  </span>
+                  <button
+                    className="btn-ghost"
+                    style={{ padding: "3px 10px", fontSize: "10px", color: "var(--accent-bright)", borderColor: "var(--accent-dim)" }}
+                    onClick={() => { setTrainingHalted(false); checkAndResume(jupyterUrl); startPolling(pod?.id ?? ""); }}
+                  >
+                    Retry
+                  </button>
+                </div>
+              )}
             </div>
           </div>
 

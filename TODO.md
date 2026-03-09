@@ -2,7 +2,9 @@
 
 ## Untested / Needs Verification
 - [ ] **RunPod launcher end-to-end re-test required** — the reconnect/resume flow, Jupyter wait, duplicate-upload guards, and retry-on-failure path have all been significantly reworked since the confirmed wet-run. A full pass from pod launch through training completion and LoRA download needs to be verified again.
-- [x] Verify `forge_get_models` is wired to model picker in CharacterSetup — confirmed, uses `invoke("forge_get_models", { baseUrl })`
+  - **Live-run completion**: `startLogPolling` already triggers `downloadOutputs` automatically on detecting "training complete" in the log — should work.
+  - **Reconnect-after-completion**: reconnect now reads `training.log` and branches on "training complete" (→ sets phase "done", logs "ready to download") vs "training failed" (→ shows Retry banner) vs still-running (→ resumes log tail). Previously it blindly resumed log polling regardless of completion state. However: on the "training complete" reconnect path, `downloadOutputs` is NOT auto-triggered — the user currently has to find and click "Retry Download" manually. This may need a dedicated "Download LoRA" button in the done phase.
+  - **Reconnect-before-training-starts**: if `training.log` is missing, falls through to `checkAndResume` which checks marker files and decides whether to re-upload or just relaunch training.
 
 ## Planned Features
 
@@ -10,8 +12,6 @@
 - [ ] Custom/favourite presets per category — allow users to save their own presets alongside the hardcoded ones, stored per-character or globally in settings
 
 ### Batch Generator
-- [x] Multi-select images for bulk approve/reject (shift-click range, ctrl-click toggle)
-- [x] Per-image Forge step progress bar — polls `forge_get_progress` every 800ms during each image, shows thin progress bar + % in status strip
 - [ ] Auto-select "All Combos" mode by default if the user hasn't explicitly chosen a mode (i.e. new character / fresh state)
 - [ ] Random mode ignores `randomCount` and generates all combos — the slice condition `combos.length > randomCount` silently skips when combos ≤ randomCount; investigate and fix so the field actually limits output
 
@@ -36,8 +36,10 @@
 
 ### General
 - [ ] Character preset gallery — save and reload full character configs (separate from project save), useful for switching between characters quickly
+- [ ] Prompting inserts the training keyword into the generate prompt pointlessly. It shouldn't do that.
 - [ ] **Fox's Automatic Braindead Character Describer (ABCD)** — AI-assisted tool to auto-generate the core description, artist tags, and trigger word from a reference image or text prompt
-- [ ] **Color themes / palette swaps** — a few built-in themes (dark, light, warm/sepia etc.) selectable in Settings, plus a `theme.ini` file for custom themes. App already uses CSS custom properties throughout (`--text`, `--accent`, `--bg-2`, etc.), so themes are just `:root` variable overrides injected at startup or on switch. Theme picker in Settings, selection persisted in Zustand store.
+- [ ] checkpoint local directory field on runpod tab autofills with an incorrect value
+- [ ] pricing on Runpod launcher page are inconsistent. Best value, price per hour, reported price on pod status marker, and price reported in the log don't match each other
 
 ---
 
@@ -82,6 +84,10 @@ mycharacter, wolf girl, long silver hair, style of artist1, {standing, full body
 
 ## Done
 
+- [x] **Color themes / palette swaps** — 7 built-in themes selectable in Settings, plus a custom JSON theme file for CSS variable overrides. Theme picker in Settings, selection persisted in Zustand store.
+- [x] **Multi-select images for bulk approve/reject** — shift-click range, ctrl-click toggle in Batch Generator.
+- [x] **Per-image Forge step progress bar** — polls `forge_get_progress` every 800ms during each image, shows thin progress bar + % in status strip.
+- [x] **`forge_get_models` wired to model picker** — CharacterSetup uses `invoke("forge_get_models", { baseUrl })`.
 - [x] **Auto-terminate pod after successful download** — `terminatePod` called after `downloadOutputs` completes without error; skipped on error. Uses `podRef`/`apiKeyRef` to avoid stale closures. Toggle checkbox in UI (default on).
 - [x] **Training time estimates recalibrated** — L40S confirmed at 0.4 steps/sec (was 1.8); all GPU entries and fallback tiers scaled proportionally.
 - [x] **`updateImage` sets `isDirty`** — close-warning now fires correctly after caption tag edits.
@@ -94,6 +100,9 @@ mycharacter, wolf girl, long silver hair, style of artist1, {standing, full body
 - [x] **Pod poll stops on fatal training error** — when `exit 1` / OOM is detected in the training log, both log and pod polling stop; UI shows "Training halted" banner with a Retry button.
 - [x] **Retry button** — appears in the log area after training fails; calls `checkAndResume` to relaunch training using files already on the pod, skipping re-upload.
 - [x] **Pipeline flow indicator** — horizontal step indicator at top of RunPod Launcher shows Create pod → Upload dataset → Get checkpoint → Training → Download LoRA → Done; steps advance automatically and turn green on completion.
-- [x] **Optimizer-aware GPU flags** — `gpuTrainingFlags` now takes optimizer as a parameter; Prodigy and DAdaptAdam reduce batch size one tier (e.g. A100 80GB: 4→2) to account for their larger float32 optimizer state footprint.
+- [x] **Optimizer-aware GPU flags** — `gpuTrainingFlags` now takes optimizer as a parameter; Prodigy and DAdaptAdam reduce batch size one tier to account for their larger float32 optimizer state footprint.
 - [x] **`PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`** — added to training command to reduce CUDA memory fragmentation.
 - [x] **Trigger word sanitisation hardened** — input now strips all non-`[a-z0-9_]` characters (was: replace spaces with `_` only), preventing accidental shell metacharacters in pod commands.
+- [x] **Reconnect training-state detection** — on reconnect, reads `training.log` and correctly branches: "training complete" → phase done + "ready to download" message; "training failed" → trainingHalted banner + Retry button; still-running → resumes log tail from end. Previously all non-empty logs just resumed polling, masking already-completed runs.
+- [x] **A100 80GB batch size reduced 4→2** — non-adaptive optimizers were previously using batch 4 on 80 GB VRAM, which fills up with SDXL + cache_latents. Reduced to 2 (matching 48 GB tier) for OOM safety. Adaptive tier also adjusted 2→1.
+- [x] **Log panel layout: status above log, banners sticky below** — `uploadStatus` spinner/message moved to the top of the log area (above log lines) so it's always visible during active phases. Error banners (download failed, training halted) moved to the bottom as sticky elements with backdrop blur so they don't obscure earlier log lines.

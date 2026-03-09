@@ -193,11 +193,13 @@ export interface GpuTrainingFlags {
 
 // Returns optimal training flags for the available VRAM.
 // Higher VRAM → larger batch, skip gradient checkpointing, cache latents.
+// SDXL with cache_latents is memory-hungry: A100 80GB (79.25 GiB usable) fills up at batch=4;
+// batch=2 keeps it safe while still being faster than lower tiers.
 // Adaptive optimizers (Prodigy, DAdaptAdam) store many float32 state tensors per parameter
 // and use significantly more VRAM than AdamW8bit — reduce batch size one tier for them.
 export function gpuTrainingFlags(vramGb: number, optimizer?: string): GpuTrainingFlags {
   const adaptive = optimizer === "Prodigy" || optimizer === "DAdaptAdam";
-  if (vramGb >= 80) return { batchSize: adaptive ? 2 : 4, gradientCheckpointing: false, cacheLatents: true };
+  if (vramGb >= 80) return { batchSize: adaptive ? 1 : 2, gradientCheckpointing: false, cacheLatents: true };
   if (vramGb >= 48) return { batchSize: adaptive ? 1 : 2, gradientCheckpointing: false, cacheLatents: true };
   if (vramGb >= 40) return { batchSize: 1,                gradientCheckpointing: true,  cacheLatents: true };
   if (vramGb >= 20) return { batchSize: 1,                gradientCheckpointing: true,  cacheLatents: true };
