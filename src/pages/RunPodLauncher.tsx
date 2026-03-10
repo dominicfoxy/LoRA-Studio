@@ -142,6 +142,15 @@ export default function RunPodLauncher() {
       const modelReady = manifestResult.status === "fulfilled";
 
       if (datasetReady && modelReady) {
+        // Check if training already produced output before relaunching
+        const outputFiles = await invoke<string[]>("jupyter_list_dir", { jupyterUrl: jUrl, password: JUPYTER_PASS, remotePath: "workspace/output" }).catch(() => []);
+        if (outputFiles.some(n => n.endsWith(".safetensors"))) {
+          log("Training output already exists — downloading instead of relaunching…");
+          setPipelineStep(3);
+          setUploadStatus(null);
+          await downloadOutputs(jUrl);
+          return;
+        }
         const selectedVram = RECOMMENDED_GPUS.find(g => g.id === config.gpuTypeId)?.vram ?? 0;
         const gpuFlags = gpuTrainingFlags(selectedVram, config.optimizer);
         log("Dataset and model already on pod — launching training directly…");
@@ -623,14 +632,13 @@ export default function RunPodLauncher() {
     setDownloadFailed(false);
     log(`Training complete — downloading LoRA to ${destDir}…`);
     try {
-      // Write file listing to a temp file on the pod
-      await jupyterRunCommand(jUrl, JUPYTER_PASS, `ls /workspace/output/*.safetensors 2>/dev/null > /workspace/output_list.txt`);
-      await new Promise(r => setTimeout(r, 1500));
-      const listing = await invoke<string>("jupyter_read_file", { jupyterUrl: jUrl, password: JUPYTER_PASS, remotePath: "workspace/output_list.txt" });
-      const files = listing.split("\n").map(l => l.trim()).filter(l => l.endsWith(".safetensors"));
+      // List output files via Jupyter contents API (more reliable than terminal ls)
+      const dirEntries = await invoke<string[]>("jupyter_list_dir", { jupyterUrl: jUrl, password: JUPYTER_PASS, remotePath: "workspace/output" });
+      const files = dirEntries.filter(n => n.endsWith(".safetensors")).map(n => `workspace/output/${n}`);
 
       if (files.length === 0) {
-        log(`No .safetensors files found in /workspace/output/`);
+        log(`No .safetensors files found in /workspace/output/ — training may still be running or output is in a different location.`);
+        setDownloadFailed(true);
         return;
       }
 
@@ -1684,6 +1692,26 @@ export default function RunPodLauncher() {
                   {line || <br />}
                 </div>
               ))}
+              {pipelineStep === 3 && jupyterUrl && !downloadFailed && !trainingHalted && (
+                <div style={{
+                  display: "flex", alignItems: "center", gap: "10px", marginTop: "8px",
+                  padding: "7px 10px", borderRadius: "5px",
+                  position: "sticky", bottom: 0,
+                  background: "rgba(100,100,100,0.15)", border: "1px solid rgba(150,150,150,0.25)",
+                  backdropFilter: "blur(4px)",
+                }}>
+                  <span style={{ fontFamily: "var(--font-mono)", fontSize: "10px", color: "var(--text-dim)", flex: 1 }}>
+                    Training complete? Force-start download
+                  </span>
+                  <button
+                    className="btn-ghost"
+                    style={{ padding: "3px 10px", fontSize: "10px", color: "var(--accent-bright)", borderColor: "var(--accent-dim)" }}
+                    onClick={() => downloadOutputs(jupyterUrl)}
+                  >
+                    Download LoRA
+                  </button>
+                </div>
+              )}
               {downloadFailed && jupyterUrl && (
                 <div style={{
                   display: "flex", alignItems: "center", gap: "10px", marginTop: "8px",

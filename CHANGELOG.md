@@ -4,6 +4,10 @@
 
 - **SDXL noise_offset disabled** — `--noise_offset 0.1` now only applied for SD1.x training. SDXL uses a different noise schedule; applying noise_offset there causes colour desaturation and drift. SDXL training omits the flag entirely.
 - **Download dotfile fix** — listing temp file renamed from `.output_list.txt` → `output_list.txt`. Jupyter Contents API can refuse hidden/dotfiles, causing the download to fail with a ~70x error.
+- **LoRA download rewrite** — `downloadOutputs` now lists output files via the Jupyter Contents API (`jupyter_list_dir`) instead of running `ls` via a terminal command. Terminal approach was unreliable (fire-and-forget, no error surface). Also sets `downloadFailed` when no files are found so the Retry button appears.
+- **Reconnect no longer restarts completed training** — `checkAndResume` now checks for `.safetensors` output files before calling `launchTraining`; if output already exists, triggers download instead of relaunch.
+- **Base64 MIME decoding fix** — `jupyter_download_file` now strips whitespace from the base64 payload before decoding. Jupyter returns MIME-wrapped base64 (with newlines) which the standard decoder rejected with "Invalid byte 10".
+- **Force-download button** — a "Training complete? Force-start download" bar appears in the log area while stuck at the Training step with Jupyter connected, allowing manual download trigger if auto-detection missed the completion signal.
 
 ---
 

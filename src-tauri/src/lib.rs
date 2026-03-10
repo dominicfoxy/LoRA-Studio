@@ -536,6 +536,26 @@ async fn jupyter_terminal_send(jupyter_url: &str, password: &str, command: &str,
 }
 
 #[tauri::command]
+async fn jupyter_list_dir(jupyter_url: String, password: String, remote_path: String) -> Result<Vec<String>, String> {
+    let (client, _xsrf, cookie_header) = jupyter_client_login(&jupyter_url, &password).await?;
+    let url = format!("{}/api/contents/{}?content=1&type=directory", jupyter_url, remote_path);
+    let res = client.get(&url)
+        .header("Cookie", &cookie_header)
+        .send().await
+        .map_err(|e| e.to_string())?;
+    if !res.status().is_success() {
+        return Err(format!("list failed ({})", res.status()));
+    }
+    let json: serde_json::Value = res.json().await.map_err(|e| e.to_string())?;
+    let names = json["content"].as_array()
+        .ok_or("missing content field")?
+        .iter()
+        .filter_map(|f| f["name"].as_str().map(|n| n.to_string()))
+        .collect();
+    Ok(names)
+}
+
+#[tauri::command]
 async fn jupyter_download_file(jupyter_url: String, password: String, remote_path: String, local_path: String) -> Result<(), String> {
     let (client, _xsrf, cookie_header) = jupyter_client_login(&jupyter_url, &password).await?;
     let url = format!("{}/api/contents/{}?content=1&format=base64&type=file", jupyter_url, remote_path);
@@ -548,7 +568,8 @@ async fn jupyter_download_file(jupyter_url: String, password: String, remote_pat
     }
     let json: serde_json::Value = res.json().await.map_err(|e| e.to_string())?;
     let b64 = json["content"].as_str().ok_or("missing content field")?;
-    let bytes = general_purpose::STANDARD.decode(b64).map_err(|e| e.to_string())?;
+    let b64_clean: String = b64.chars().filter(|c| !c.is_ascii_whitespace()).collect();
+    let bytes = general_purpose::STANDARD.decode(&b64_clean).map_err(|e| e.to_string())?;
     if let Some(parent) = std::path::Path::new(&local_path).parent() {
         fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
@@ -608,6 +629,7 @@ pub fn run() {
             jupyter_upload_file,
             jupyter_run_command,
             jupyter_read_file,
+            jupyter_list_dir,
             jupyter_download_file,
         ])
         .run(tauri::generate_context!())

@@ -2,7 +2,6 @@
 
 ## In Progress / Needs Verification
 
-- [ ] **RunPod end-to-end wet-run** — download dotfile fix and SDXL noise_offset fix are untested in a real run. Need to confirm: file listing, download, auto-terminate all complete cleanly.
 - [ ] **RunPod Launcher loses pod connection on navigation** — pod/Jupyter URL survive navigation (lifted into Zustand in-memory store), but local React state (zip path, pipeline step, etc.) resets on remount. The reconnect path handles most cases but hasn't been fully tested post-refactor.
 
 ---
@@ -43,4 +42,6 @@
 
 ## Known Bugs
 
-_(none currently logged)_
+- [ ] Detecting readiness of jupyter and kohya containers is slow
+- [ ] user note that training typically takes 30-90 mins is misleading. Reword to be 'training can take a long time' to avoid raising hopes of users
+
