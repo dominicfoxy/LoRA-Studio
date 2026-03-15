@@ -145,7 +145,7 @@ const defaultTraining: TrainingConfig = {
   cloudType: "SECURE",
   steps: 1500,
   learningRate: "1e-4",
-  networkDim: 64,
+  networkDim: 32,
   resolution: 1024,
   networkVolumeId: "",
   baseModelLocalPath: "",
@@ -236,7 +236,7 @@ export const useStore = create<ProjectState>()(
     }),
     {
       name: "lora-studio-state",
-      version: 15,
+      version: 16,
       migrate: (persistedState: unknown, version: number) => {
         const state = persistedState as any;
         // v0: flat string fields on shot items
@@ -356,6 +356,10 @@ export const useStore = create<ProjectState>()(
         // v14→15: add theme fields to settings
         if (version === 14) {
           state.settings = { ...defaultSettings, ...state.settings, activeTheme: "default", themeFile: "" };
+        }
+        // v15→16: reduce default SDXL networkDim 64→32 (higher rank absorbs style/color from training data)
+        if (version === 15) {
+          if (state.training?.networkDim === 64) state.training = { ...state.training, networkDim: 32 };
         }
         // ensure theme fields always present regardless of migration path
         if (!state.settings?.activeTheme) {

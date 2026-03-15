@@ -56,6 +56,18 @@ export default function RunPodLauncher() {
   const [networkVolumes, setNetworkVolumes] = useState<NetworkVolume[]>([]);
   const [fetchingVolumes, setFetchingVolumes] = useState(false);
   const [uploadStatus, setUploadStatus] = useState<string | null>(null);
+
+  // Starts a 1s elapsed-time ticker in uploadStatus. Returns a stop function.
+  const startTicker = (label: string) => {
+    const start = Date.now();
+    setUploadStatus(`${label} (0s)`);
+    const id = setInterval(() => {
+      const s = Math.round((Date.now() - start) / 1000);
+      const t = s >= 60 ? `${Math.floor(s / 60)}m ${s % 60}s` : `${s}s`;
+      setUploadStatus(`${label} (${t})`);
+    }, 1000);
+    return () => clearInterval(id);
+  };
   const [trainingHalted, setTrainingHalted] = useState(false);
   const [downloadFailed, setDownloadFailed] = useState(false);
   const [modelQuery, setModelQuery] = useState("");
@@ -326,7 +338,9 @@ export default function RunPodLauncher() {
 
     try {
       const zipOut = `${character.outputDir}/${character.triggerWord}_dataset.zip`;
+      const stopPackagingTicker = startTicker("Packaging dataset…");
       await invoke("zip_dataset", { datasetDir: character.outputDir, outputZip: zipOut });
+      stopPackagingTicker();
       setZipPath(zipOut);
       setExistingZip(true);
       log(`Dataset zipped → ${zipOut}`);
@@ -388,8 +402,9 @@ export default function RunPodLauncher() {
       const newPod = await createPod(settings.runpodApiKey, podSpec);
       setPod(newPod);
       log(`Pod created: ${newPod.id} (${newPod.status})`);
-      log(`Cost: ~$${newPod.costPerHr?.toFixed(2) ?? "?"} USD/hr`);
+      log(`Cost: $${newPod.costPerHr?.toFixed(3) ?? "?"}/hr`);
       log(`Waiting for pod to start and trainer to launch…`);
+      log(`Note: pod startup typically takes 3–6 minutes. If it seems stuck, it's probably fine — RunPod can be slow to provision.`);
       startPolling(newPod.id);
       setPipelineStep(0);
     } catch (err) {
@@ -432,15 +447,18 @@ export default function RunPodLauncher() {
     if (_jupyterWaitId) { clearInterval(_jupyterWaitId); _jupyterWaitId = null; }
     let attempts = 0;
     log(`Waiting for Jupyter to come up…`);
+    const stopJupyterTicker = startTicker("Waiting for Jupyter…");
     _jupyterWaitId = setInterval(async () => {
       attempts++;
       const ready = await invoke<boolean>("jupyter_is_ready", { jupyterUrl: url, password: "lorastudio" });
       if (ready) {
         if (_jupyterWaitId) { clearInterval(_jupyterWaitId); _jupyterWaitId = null; }
+        stopJupyterTicker();
         log(`Jupyter ready — starting upload…`);
         uploadToVolume(url);
       } else if (attempts >= 48) {
         if (_jupyterWaitId) { clearInterval(_jupyterWaitId); _jupyterWaitId = null; }
+        stopJupyterTicker();
         log(`Jupyter unreachable after 12 min — pod may still be starting. Open ${url}/lab to check manually.`);
       }
     }, 15000);
@@ -476,17 +494,44 @@ export default function RunPodLauncher() {
     const trainScript = config.sdxl ? "sdxl_train_network.py" : "train_network.py";
     const gradCkptFlag = gpuFlags.gradientCheckpointing ? "--gradient_checkpointing" : "";
     const cacheLatentsFlag = gpuFlags.cacheLatents ? "--cache_latents" : "";
-    // noise_offset helps contrast/saturation in SD1.x but causes color drift on SDXL (different noise schedule)
-    const noiseOffsetFlag = config.sdxl ? "" : "--noise_offset 0.1";
+    // noise_offset 0.03 improves contrast/saturation in SD1.x; causes color drift on SDXL (different noise schedule)
+    const noiseOffsetFlag = config.sdxl ? "" : "--noise_offset 0.03";
+    // SDXL VAE has fp16 precision issues that cause systematic color errors baked into LoRA weights
+    const noHalfVaeFlag = config.sdxl ? "--no_half_vae" : "";
+    const trainingArgs = [
+      `accelerate launch --num_cpu_threads_per_process 1 ${trainScript}`,
+      `--dataset_config /workspace/kohya_config.toml`,
+      `--pretrained_model_name_or_path /workspace/models/${modelBaseName}`,
+      `--output_dir /workspace/output`,
+      `--output_name ${character.triggerWord}_lora`,
+      `--save_model_as safetensors`,
+      `--max_train_steps ${config.steps}`,
+      `--learning_rate ${lr}`,
+      `--lr_scheduler ${lrScheduler}`,
+      lrWarmupFlag,
+      `--optimizer_type ${config.optimizer}`,
+      optimizerArgs,
+      `--network_module networks.lora`,
+      `--network_dim ${config.networkDim}`,
+      `--network_alpha ${networkAlpha}`,
+      noiseOffsetFlag,
+      noHalfVaeFlag,
+      `--mixed_precision bf16`,
+      `--save_precision fp16`,
+      gradCkptFlag,
+      cacheLatentsFlag,
+      `--save_every_n_steps ${saveEveryNSteps}`,
+    ].filter(s => s.trim()).join(" \\\n  ");
+    await invoke("save_project", { path: `${character.outputDir}/training_command.txt`, data: `# Training command (debug)\n# Script: ${trainScript}\n# Generated: ${new Date().toISOString()}\n\n${trainingArgs}\n` });
     log(`[info] accelerate launch ${trainScript} --optimizer_type ${config.optimizer} --max_train_steps ${config.steps} --network_dim ${config.networkDim} --network_alpha ${networkAlpha}${noiseOffsetFlag ? " " + noiseOffsetFlag : " (no noise_offset — SDXL)"}`);
     await jupyterRunCommand(jUrl, JUPYTER_PASS,
-      `nohup bash -c '> /workspace/training.log; SCRIPT=\$(find /workspace -maxdepth 5 -name "${trainScript}" 2>/dev/null | head -1); if [ -z "\$SCRIPT" ]; then echo "ERROR: ${trainScript} not found" >> /workspace/training.log; exit 1; fi; PYTHON=""; for P in /venv/bin/python3 /venv/bin/python /opt/conda/bin/python3 /workspace/venv/bin/python3 /workspace/venv/bin/python /usr/local/bin/python3; do if [ -f "\$P" ] && "\$P" -c "import accelerate" 2>/dev/null; then PYTHON="\$P"; break; fi; done; if [ -z "\$PYTHON" ]; then echo "ERROR: no Python with accelerate found" >> /workspace/training.log; exit 1; fi; ACCEL=\$(dirname "\$PYTHON")/accelerate; mkdir -p /workspace/output; echo "launcher: \$ACCEL" >> /workspace/training.log; export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True; cd "\$(dirname "\$SCRIPT")" && "\$ACCEL" launch --num_cpu_threads_per_process 1 "\$SCRIPT" --dataset_config /workspace/kohya_config.toml --pretrained_model_name_or_path /workspace/models/${modelBaseName} --output_dir /workspace/output --output_name ${character.triggerWord}_lora --save_model_as safetensors --max_train_steps ${config.steps} --learning_rate ${lr} --lr_scheduler ${lrScheduler} ${lrWarmupFlag} --optimizer_type ${config.optimizer} ${optimizerArgs} --network_module networks.lora --network_dim ${config.networkDim} --network_alpha ${networkAlpha} --min_snr_gamma 5 ${noiseOffsetFlag} --mixed_precision fp16 --save_precision fp16 ${gradCkptFlag} ${cacheLatentsFlag} --save_every_n_steps ${saveEveryNSteps} >> /workspace/training.log 2>&1; EXIT_CODE=\$?; echo "training complete" >> /workspace/training.log; if [ \$EXIT_CODE -ne 0 ]; then echo "training failed (exit \$EXIT_CODE)" >> /workspace/training.log; fi' &`
+      `nohup bash -c '> /workspace/training.log; SCRIPT=\$(find /workspace -maxdepth 5 -name "${trainScript}" 2>/dev/null | head -1); if [ -z "\$SCRIPT" ]; then echo "ERROR: ${trainScript} not found" >> /workspace/training.log; exit 1; fi; PYTHON=""; for P in /venv/bin/python3 /venv/bin/python /opt/conda/bin/python3 /workspace/venv/bin/python3 /workspace/venv/bin/python /usr/local/bin/python3; do if [ -f "\$P" ] && "\$P" -c "import accelerate" 2>/dev/null; then PYTHON="\$P"; break; fi; done; if [ -z "\$PYTHON" ]; then echo "ERROR: no Python with accelerate found" >> /workspace/training.log; exit 1; fi; ACCEL=\$(dirname "\$PYTHON")/accelerate; mkdir -p /workspace/output; echo "launcher: \$ACCEL" >> /workspace/training.log; export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True; cd "\$(dirname "\$SCRIPT")" && "\$ACCEL" launch --num_cpu_threads_per_process 1 "\$SCRIPT" --dataset_config /workspace/kohya_config.toml --pretrained_model_name_or_path /workspace/models/${modelBaseName} --output_dir /workspace/output --output_name ${character.triggerWord}_lora --save_model_as safetensors --max_train_steps ${config.steps} --learning_rate ${lr} --lr_scheduler ${lrScheduler} ${lrWarmupFlag} --optimizer_type ${config.optimizer} ${optimizerArgs} --network_module networks.lora --network_dim ${config.networkDim} --network_alpha ${networkAlpha} ${noiseOffsetFlag} ${noHalfVaeFlag} --mixed_precision bf16 --save_precision fp16 ${gradCkptFlag} ${cacheLatentsFlag} --save_every_n_steps ${saveEveryNSteps} >> /workspace/training.log 2>&1; EXIT_CODE=\$?; echo "training complete" >> /workspace/training.log; if [ \$EXIT_CODE -ne 0 ]; then echo "training failed (exit \$EXIT_CODE)" >> /workspace/training.log; fi' &`
     );
     setPipelineStep(3);
     setTrainingHalted(false);
     setUploadStatus(null);
     log(`Training started — polling /workspace/training.log for progress…`);
-    log(`Note: training typically takes 30–90 minutes. You can close the app and reopen it later — it will reconnect to the running pod.`);
+    log(`Note: training can take a long time depending on your dataset and GPU. You can close the app and reopen it later — it will reconnect to the running pod.`);
     startLogPolling(jUrl, 0);
   };
 
@@ -532,19 +577,22 @@ export default function RunPodLauncher() {
       await jupyterUploadFile(jUrl, JUPYTER_PASS, `workspace/${configName}`, configPath);
       log(`Config uploaded.`);
 
-      // Dataset upload + extraction — skip if already extracted on pod
+      // Dataset upload + extraction — skip only in reconnect mode (skipZipUpload), never on a fresh upload
       let datasetExtracted = false;
-      try {
-        await invoke<string>("jupyter_read_file", { jupyterUrl: jUrl, password: JUPYTER_PASS, remotePath: "workspace/.extract_done" });
-        log("Dataset already extracted on pod — skipping upload.");
-        datasetExtracted = true;
-      } catch { /* needs extraction */ }
+      if (opts.skipZipUpload) {
+        try {
+          await invoke<string>("jupyter_read_file", { jupyterUrl: jUrl, password: JUPYTER_PASS, remotePath: "workspace/.extract_done" });
+          log("Dataset already extracted on pod — skipping upload.");
+          datasetExtracted = true;
+        } catch { /* needs extraction */ }
+      }
 
       if (!datasetExtracted) {
         if (!opts.skipZipUpload) {
-          setUploadStatus(`Uploading dataset zip (${zipName})…`);
           log(`Uploading ${zipName} to volume…`);
+          const stopZipTicker = startTicker(`Uploading dataset zip…`);
           await jupyterUploadFile(jUrl, JUPYTER_PASS, `workspace/${zipName}`, actualZipPath!);
+          stopZipTicker();
           log(`Dataset uploaded.`);
         }
         setUploadStatus(`Extracting dataset on pod…`);
@@ -600,9 +648,10 @@ export default function RunPodLauncher() {
         if (existing?.modelName && existing.modelName !== modelBaseName) {
           log(`WARNING: Replacing model on volume (${existing.modelName} → ${modelBaseName}).`);
         }
-        setUploadStatus(`Uploading ${modelBaseName} from local disk…`);
         log(`Uploading checkpoint from local path (this may take a while)…`);
+        const stopModelUploadTicker = startTicker(`Uploading ${modelBaseName}…`);
         await jupyterUploadFile(jUrl, JUPYTER_PASS, `workspace/models/${modelBaseName}`, config.baseModelLocalPath);
+        stopModelUploadTicker();
         await jupyterRunCommand(jUrl, JUPYTER_PASS, `echo "${modelBaseName}" > /workspace/.model_manifest`);
         log(`Model uploaded.`);
       } else {
@@ -651,14 +700,17 @@ export default function RunPodLauncher() {
         const filename = remotePath.split("/").pop()!;
         const localPath = `${destDir}/${filename}`;
         log(`Downloading ${filename}…`);
+        const stopDownloadTicker = startTicker(`Downloading ${filename}…`);
         await invoke("jupyter_download_file", {
           jupyterUrl: jUrl,
           password: JUPYTER_PASS,
           remotePath: remotePath.replace(/^\//, ""),
           localPath,
         });
+        stopDownloadTicker();
         log(`Saved → ${localPath}`);
       }
+      setUploadStatus(null);
       setPipelineStep(5);
       log(`Download complete.`);
       // Auto-terminate pod to stop billing (if enabled)
@@ -699,10 +751,19 @@ export default function RunPodLauncher() {
 
         let lastPodLine = "";
         for (const raw of newLines) {
-          const line = raw.trimEnd();
+          const line = raw.trimEnd().replace(/\t\S+\.py:\d+$/, "");
           if (!line) { inTraceback = false; continue; }
           // Skip tqdm progress-bar lines (contain block chars or bare percentage bars)
-          if (/[█▏▎▍▌▋▊▉]|^\s*\d+%\s*\|/.test(line)) continue;
+          // But first extract step progress to mirror into the status line
+          if (/[█▏▎▍▌▋▊▉]|^\s*\d+%\s*\|/.test(line)) {
+            const m = line.match(/(\d+)\/(\d+)/);
+            if (m) {
+              const cur = parseInt(m[1]), total = parseInt(m[2]);
+              if (total > 0 && cur <= total)
+                setUploadStatus(`Training: step ${cur}/${total} (${Math.round(cur / total * 100)}%)`);
+            }
+            continue;
+          }
           // Skip Kohya multi-process bookkeeping (logged 8× per epoch by accelerate workers)
           if (/epoch is incremented/i.test(line)) continue;
 
@@ -723,6 +784,7 @@ export default function RunPodLauncher() {
         // Stop polling on completion or fatal halt (check only new lines to avoid re-triggering)
         if (/training (finished|complete|done)|^training complete$/im.test(newContent)) {
           if (_logPollId) { clearInterval(_logPollId); _logPollId = null; }
+          setUploadStatus(null);
           downloadOutputs(jUrl);
         } else if (/training failed \(exit|ModuleNotFoundError|No module named|command not found/i.test(newContent)) {
           if (_logPollId) { clearInterval(_logPollId); _logPollId = null; }
@@ -736,10 +798,15 @@ export default function RunPodLauncher() {
   };
 
   const startPolling = (podId: string) => {
+    if (!podId) return;
     if (_podPollId) { clearInterval(_podPollId); _podPollId = null; }
     setPolling(true);
     let consecutiveErrors = 0;
+    let cancelled = false;
+    const stopPodTicker = startTicker("Waiting for pod to start…");
     const stopPolling = (reason: string) => {
+      cancelled = true;
+      stopPodTicker();
       log(reason);
       if (_podPollId) { clearInterval(_podPollId); _podPollId = null; }
       setPolling(false);
@@ -750,8 +817,12 @@ export default function RunPodLauncher() {
       if (_jupyterWaitId) { clearInterval(_jupyterWaitId); _jupyterWaitId = null; }
       setUploadStatus(null);
       setPhase("done");
+      // Clear persisted pod ID so reconnect effect doesn't re-fire on next mount
+      setRunpodActivePodId("");
+      setRunpodActiveJupyterUrl("");
     };
     const tick = async () => {
+      if (cancelled) return;
       try {
         const updated = await getPod(settings.runpodApiKey, podId);
         consecutiveErrors = 0;
@@ -765,6 +836,7 @@ export default function RunPodLauncher() {
           setJupyterUrl(url);
           // Only start readiness polling once the pod has real uptime (Docker is running)
           if (!jupyterUrlRef.current && uptime > 0) {
+            stopPodTicker();
             jupyterUrlRef.current = url;
             log(`Pod running (uptime: ${uptime}s) — waiting for Jupyter…`);
             startJupyterWait(url);
@@ -1154,8 +1226,8 @@ export default function RunPodLauncher() {
               const price = livePrices?.[gpu.id];
               const priceStr = price
                 ? config.cloudType === "COMMUNITY"
-                  ? `$${price.community.toFixed(2)}/hr spot`
-                  : `$${price.secure.toFixed(2)}/hr`
+                  ? `from $${price.community.toFixed(3)}/hr spot`
+                  : `from $${price.secure.toFixed(3)}/hr`
                 : null;
               const selected = config.gpuTypeId === gpu.id;
               const isBest = bestValueGpuId?.id === gpu.id;
@@ -1192,7 +1264,7 @@ export default function RunPodLauncher() {
                       <div style={{ display: "flex", gap: "5px", marginTop: "4px", flexWrap: "wrap" }}>
                         {isBest && (
                           <div style={{ fontFamily: "var(--font-mono)", fontSize: "9px", color: "var(--green)", letterSpacing: "0.06em", textTransform: "uppercase", padding: "1px 5px", borderRadius: "3px", background: "rgba(74,154,106,0.12)", border: "1px solid var(--green)" }}>
-                            best value · ~${bestValueGpuId.cost.toFixed(2)}
+                            best value · from ~${bestValueGpuId.cost.toFixed(2)} est. total
                           </div>
                         )}
                         {config.networkVolumeId && (
@@ -1329,7 +1401,7 @@ export default function RunPodLauncher() {
               color: "var(--text-muted)",
               lineHeight: 1.5,
             }}>
-              Recommended for Illustrious: dim=32, alpha=16, lr=1e-4, 1500–2500 steps depending on dataset size.
+              Recommended for Illustrious: dim=32, alpha=16, lr=1e-4, 1500–2500 steps depending on dataset size. For SDXL character LoRAs, dim=32 is preferred — higher rank absorbs style and colour from training data.
             </div>
             <div style={{ marginTop: "10px", display: "flex", alignItems: "center", gap: "16px" }}>
               {[
@@ -1602,7 +1674,7 @@ export default function RunPodLauncher() {
                     </span>
                   </div>
                   <div style={{ fontFamily: "var(--font-mono)", fontSize: "10px", color: "var(--text-muted)" }}>
-                    ${pod.costPerHr?.toFixed(3) ?? "?"} USD/hr
+                    ${pod.costPerHr?.toFixed(3) ?? "?"}/hr
                     {pod.runtime?.uptimeInSeconds ? ` · ${Math.floor(pod.runtime.uptimeInSeconds / 60)}m uptime` : ""}
                     {polling ? " · polling every 15s" : ""}
                   </div>

@@ -213,17 +213,22 @@ async fn zip_dataset(dataset_dir: String, output_zip: String) -> Result<String, 
         .compression_method(zip::CompressionMethod::Deflated);
 
     let dataset_path = Path::new(&dataset_dir);
+    let output_zip_path = Path::new(&output_zip);
     for entry in walkdir::WalkDir::new(dataset_path) {
         let entry = entry.map_err(|e| e.to_string())?;
         let path = entry.path();
-        if path.is_file() {
-            let rel = path.strip_prefix(dataset_path).map_err(|e| e.to_string())?;
-            zip.start_file(rel.to_string_lossy(), options).map_err(|e| e.to_string())?;
-            let mut f = fs::File::open(path).map_err(|e| e.to_string())?;
-            let mut buf = Vec::new();
-            f.read_to_end(&mut buf).map_err(|e| e.to_string())?;
-            zip.write_all(&buf).map_err(|e| e.to_string())?;
-        }
+        if !path.is_file() { continue; }
+        // Only include image and caption sidecar files — skip zip, toml, json, etc.
+        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
+        if !matches!(ext.as_str(), "png" | "jpg" | "jpeg" | "webp" | "txt") { continue; }
+        // Never include the output zip itself (it lives in the same directory)
+        if path == output_zip_path { continue; }
+        let rel = path.strip_prefix(dataset_path).map_err(|e| e.to_string())?;
+        zip.start_file(rel.to_string_lossy(), options).map_err(|e| e.to_string())?;
+        let mut f = fs::File::open(path).map_err(|e| e.to_string())?;
+        let mut buf = Vec::new();
+        f.read_to_end(&mut buf).map_err(|e| e.to_string())?;
+        zip.write_all(&buf).map_err(|e| e.to_string())?;
     }
     zip.finish().map_err(|e| e.to_string())?;
     Ok(output_zip)
@@ -557,19 +562,21 @@ async fn jupyter_list_dir(jupyter_url: String, password: String, remote_path: St
 
 #[tauri::command]
 async fn jupyter_download_file(jupyter_url: String, password: String, remote_path: String, local_path: String) -> Result<(), String> {
-    let (client, _xsrf, cookie_header) = jupyter_client_login(&jupyter_url, &password).await?;
-    let url = format!("{}/api/contents/{}?content=1&format=base64&type=file", jupyter_url, remote_path);
+    let (_client, _xsrf, cookie_header) = jupyter_client_login(&jupyter_url, &password).await?;
+    // Use /files/ endpoint for direct binary streaming — avoids base64 overhead and 60s login-client timeout
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(600))
+        .build()
+        .map_err(|e| e.to_string())?;
+    let url = format!("{}/files/{}", jupyter_url, remote_path);
     let res = client.get(&url)
         .header("Cookie", &cookie_header)
         .send().await
         .map_err(|e| e.to_string())?;
     if !res.status().is_success() {
-        return Err(format!("download failed ({})", res.status()));
+        return Err(format!("download failed ({}): {}", res.status(), url));
     }
-    let json: serde_json::Value = res.json().await.map_err(|e| e.to_string())?;
-    let b64 = json["content"].as_str().ok_or("missing content field")?;
-    let b64_clean: String = b64.chars().filter(|c| !c.is_ascii_whitespace()).collect();
-    let bytes = general_purpose::STANDARD.decode(&b64_clean).map_err(|e| e.to_string())?;
+    let bytes = res.bytes().await.map_err(|e| e.to_string())?;
     if let Some(parent) = std::path::Path::new(&local_path).parent() {
         fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }

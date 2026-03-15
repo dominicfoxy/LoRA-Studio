@@ -104,6 +104,7 @@ function PreviewPane({ img, onApprove, onReject, onDelete, onLightbox }: {
 }) {
   const [b64, setB64] = useState<string | null>(null);
   const [deleting, setDeleting] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
 
   useEffect(() => {
     if (!img) { setB64(null); return; }
@@ -122,8 +123,14 @@ function PreviewPane({ img, onApprove, onReject, onDelete, onLightbox }: {
 
   const handleDelete = async () => {
     setDeleting(true);
-    try { await invoke("delete_image", { path: img.path }); } catch {}
-    onDelete();
+    setDeleteError(null);
+    try {
+      await invoke("delete_image", { path: img.path });
+      onDelete();
+    } catch (e) {
+      setDeleteError(`Delete failed: ${e}`);
+      setDeleting(false);
+    }
   };
 
   return (
@@ -152,6 +159,9 @@ function PreviewPane({ img, onApprove, onReject, onDelete, onLightbox }: {
         {img.caption || <span style={{ opacity: 0.5 }}>no caption</span>}
       </div>
 
+      {deleteError && (
+        <div style={{ padding: "4px 14px", fontFamily: "var(--font-mono)", fontSize: "10px", color: "var(--red)", borderTop: "1px solid var(--border)" }}>{deleteError}</div>
+      )}
       {/* Buttons */}
       <div style={{ padding: "10px 14px", display: "flex", gap: "8px", borderTop: "1px solid var(--border)", flexShrink: 0 }}>
         <button onClick={onApprove} style={{ flex: 1, padding: "8px", fontSize: "13px", background: img.approved === true ? "var(--green)" : "var(--green-dim)", border: `1px solid var(--green)`, color: img.approved === true ? "white" : "var(--green)", borderRadius: "4px", cursor: "pointer", fontFamily: "var(--font-display)", fontWeight: 700, letterSpacing: "0.05em" }}>✓ Approve</button>
@@ -180,6 +190,7 @@ function ImageCard({ img, selected, focused, onSelect, onFocus, onApprove, onRej
   const [b64, setB64] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
 
   const loadImage = async () => {
     if (b64 || loading) return;
@@ -195,8 +206,14 @@ function ImageCard({ img, selected, focused, onSelect, onFocus, onApprove, onRej
 
   const handleDelete = async () => {
     setDeleting(true);
-    try { await invoke("delete_image", { path: img.path }); } catch {}
-    onDelete();
+    setDeleteError(null);
+    try {
+      await invoke("delete_image", { path: img.path });
+      onDelete();
+    } catch (e) {
+      setDeleteError(`${e}`);
+      setDeleting(false);
+    }
   };
 
   const border = selected ? "2px solid var(--accent)"
@@ -244,9 +261,9 @@ function ImageCard({ img, selected, focused, onSelect, onFocus, onApprove, onRej
         </button>
       </div>
 
-      {/* Caption snippet */}
-      <div style={{ padding: "0 8px 8px", fontFamily: "var(--font-mono)", fontSize: "9px", color: "var(--text-muted)", lineHeight: 1.4, overflow: "hidden", display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical" }}>
-        {img.caption}
+      {/* Caption snippet / delete error */}
+      <div style={{ padding: "0 8px 8px", fontFamily: "var(--font-mono)", fontSize: "9px", color: deleteError ? "var(--red)" : "var(--text-muted)", lineHeight: 1.4, overflow: "hidden", display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical" }}>
+        {deleteError ?? img.caption}
       </div>
     </div>
   );
@@ -332,7 +349,7 @@ export default function BatchGenerator() {
           addImage({ id: imageId, shotId, path: imagePath, prompt, caption, approved: null, seed, width, height });
           // If this was a requeue, delete the old file and remove it from store now that replacement succeeded
           if (sourceImageId && sourceImagePath) {
-            try { await invoke("delete_image", { path: sourceImagePath }); } catch {}
+            try { await invoke("delete_image", { path: sourceImagePath }); } catch (e) { console.error("requeue: failed to delete old image:", e); }
             removeImage(sourceImageId);
             setSelectedIds((prev) => { const n = new Set(prev); n.delete(sourceImageId); return n; });
           }

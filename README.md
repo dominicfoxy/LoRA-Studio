@@ -88,6 +88,7 @@ npm run tauri build  # production build
 - Each image shows its derived booru caption (from generation prompt)
 - Edit via tag chips (click × to remove) or raw textarea
 - Trigger word is pinned first, highlighted in amber
+- **Add tag to all** — type a tag in the Dataset Tags header and press Enter or "+ All" to append it to every visible image at once
 - **Save All** writes all `.txt` sidecars
 
 ### 5. RunPod Launcher
@@ -108,14 +109,14 @@ npm run tauri build  # production build
 
 | Parameter | Recommended | Notes |
 |---|---|---|
-| Network dim | 64 | Higher = more capacity but larger file |
-| Network alpha | 32 | Half of dim is standard |
+| Network dim | 32 | Higher absorbs style/colour from training data; 32 is the sweet spot for character LoRAs |
+| Network alpha | 16 | Half of dim is standard |
 | Learning rate | 1e-4 | Lower = more conservative |
 | Steps | 1500–2500 | ~15 steps/image is a good ratio |
 | Resolution | 1024 | Illustrious native resolution |
 | Batch size | auto | Tuned to GPU VRAM (1–4) |
 | Optimizer | AdamW8bit | Memory efficient |
-| Mixed precision | fp16 | Better color fidelity than bf16 |
+| Mixed precision | bf16 | Better dynamic range than fp16; avoids overflow on Ampere+ GPUs |
 
 ## Dataset Recommendations
 
@@ -133,6 +134,7 @@ output_dir/
   *.txt                     # caption sidecars (one per image)
   project.json              # project state (save from Character Setup)
   kohya_config.toml         # generated training config
+  training_command.txt      # full training command (for debugging)
   <trigger>_dataset.zip     # packaged dataset for RunPod upload
 ```
 
@@ -141,7 +143,7 @@ output_dir/
 - Training is fully automated — no manual Jupyter interaction required
 - A **Network Volume** caches the base model between runs, avoiding repeated 6GB+ downloads. Volumes are datacenter-specific; if your chosen GPU isn't available in the volume's datacenter, the app will launch without the volume and download fresh automatically
 - The finished LoRA downloads to your character's output directory when training completes
-- **Terminate the pod** after training to stop billing — auto-terminate on download is planned
+- **Auto-terminate** is enabled by default — the pod is stopped automatically after a successful download. Disable with the toggle in the launcher if you want to keep it running.
 
 ## Architecture
 

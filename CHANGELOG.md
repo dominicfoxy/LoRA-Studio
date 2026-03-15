@@ -1,8 +1,32 @@
 # LoRA Studio — Changelog
 
-## [Unreleased] — next push
+## [v1.0.4-alpha]
 
-- **SDXL noise_offset disabled** — `--noise_offset 0.1` now only applied for SD1.x training. SDXL uses a different noise schedule; applying noise_offset there causes colour desaturation and drift. SDXL training omits the flag entirely.
+- **SDXL `--no_half_vae`** — added for SDXL training only. SDXL's VAE produces NaN corruption in fp16 mode which manifests as colour distortion baked into LoRA weights; forcing fp32 VAE during training prevents this.
+- **SDXL `network_dim` default reduced 64→32** — SDXL is ~3-4× more expressive per rank unit than SD1.5, making dim=64 equivalent to dim=256 on SD1.5. Higher rank absorbs style and colour palette from training data alongside the character concept. 32 is the community consensus for SDXL character LoRAs. Store migrated to v16; existing users with dim=64 are reset to 32.
+- **`mixed_precision` changed fp16→bf16** — bf16 has better dynamic range than fp16 and avoids overflow/NaN during training on modern GPUs (Ampere+). `save_precision` remains fp16.
+- **`--noise_offset` reduced 0.1→0.03 for SD1.x** — 0.1 was too aggressive; 0.03 gives a mild contrast/saturation improvement without distorting darker tones. SDXL still omits noise_offset entirely.
+- **`--min_snr_gamma 5` removed** — was interfering with image generation quality; removed from training command.
+- **LoRA download rewrite: binary streaming** — `jupyter_download_file` now uses Jupyter's `/files/` endpoint for direct binary download instead of the base64-over-JSON `/api/contents/` API. Eliminates ~33% size overhead from base64 encoding and uses a dedicated 10-minute timeout client (was 60s via the shared login client). Confirmed working in testing.
+- **`zip_dataset` content fix** — zip now only includes image files (`.png/.jpg/.jpeg/.webp`) and caption sidecars (`.txt`). Previously included the zip itself, `kohya_config.toml`, `project.json`, and any other files in the output directory.
+- **Upload always re-extracts on fresh launch** — the `.extract_done` skip on the pod now only applies in reconnect mode (`skipZipUpload: true`). A fresh upload always re-uploads the zip and re-extracts, regardless of what's already on the pod.
+- **Caption Editor: global Add Tag** — input + "Add to All" button in the Dataset Tags panel header adds a tag to every filtered image at once and saves all captions to disk.
+- **Elapsed-time tickers** — `startTicker` helper added; all major pipeline stages now show elapsed time in the status line: packaging, zip upload, local model upload, pod startup wait, Jupyter readiness wait, and per-file LoRA download.
+- **Training step progress** — tqdm lines are parsed for `step X/Y` and mirrored into the status line as "Training: step 450/2000 (22%)". Clears when training completes.
+- **Pod startup user note** — a "typically takes 3–6 minutes" note is logged immediately after pod creation so users don't assume it's hung.
+- **Training time message reworded** — changed from "typically takes 30–90 minutes" to "can take a long time depending on your dataset and GPU" to avoid misleading time expectations.
+- **Pricing consistency** — all prices standardised to 3 decimal places with `/hr` suffix. Pre-launch GPU selector prices labelled `from $X.XXX/hr` (they reflect the global floor, not actual pod cost). Best value badge labelled `est. total` to distinguish it from a per-hour rate.
+- **Polling `cancelled` flag** — each `startPolling` session now carries a `cancelled` flag; in-flight async ticks self-abort if a newer session has started, preventing duplicate error accumulation from concurrent polling instances.
+- **`stopPolling` clears persisted pod ID** — `runpodActivePodId` and `runpodActiveJupyterUrl` are now cleared from the Zustand store when polling stops for any reason, so the reconnect effect doesn't re-fire on next page mount against a ghost pod.
+- **Log line cleanup: strip filename/lineno suffix** — Kohya appends `\tfilename.py:lineno` to INFO log lines; these are now stripped before display.
+- **Training command debug file** — `training_command.txt` saved to `outputDir` on each training run for debugging; previously had a bug where the script name was written as literal `[trainScript]`.
+- **Delete error surfacing** — `delete_image` failures in the Batch Generator (card trash button and preview pane) now surface inline instead of silently passing. The store entry is only removed if the file delete succeeds. Requeue path logs failures to console rather than swallowing them.
+
+---
+
+## [v1.0.3-alpha]
+
+- **SDXL noise_offset disabled** — `--noise_offset` now only applied for SD1.x training. SDXL uses a different noise schedule; applying noise_offset there causes colour desaturation and drift.
 - **Download dotfile fix** — listing temp file renamed from `.output_list.txt` → `output_list.txt`. Jupyter Contents API can refuse hidden/dotfiles, causing the download to fail with a ~70x error.
 - **LoRA download rewrite** — `downloadOutputs` now lists output files via the Jupyter Contents API (`jupyter_list_dir`) instead of running `ls` via a terminal command. Terminal approach was unreliable (fire-and-forget, no error surface). Also sets `downloadFailed` when no files are found so the Retry button appears.
 - **Reconnect no longer restarts completed training** — `checkAndResume` now checks for `.safetensors` output files before calling `launchTraining`; if output already exists, triggers download instead of relaunch.

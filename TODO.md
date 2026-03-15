@@ -20,28 +20,28 @@
 ### UX Pattern: Live Status Mirror
 - [ ] Anywhere there's a log panel monitoring an ongoing process, show a persistent "currently doing X" status line above the log (see `uploadStatus` in RunPodLauncher). Candidates: Batch Generator progress label, Caption Editor save-all feedback.
 
-### RunPod Launcher — Documentation / UX Notes
-- [ ] **Pod startup slow — needs user-facing note**: From "Launch" to "Jupyter ready" typically takes 3–6 minutes. Add an inline note near the "Waiting for pod to start" phase so users don't assume it's broken.
-
-### RunPod Launcher — Status Feedback Gaps
-`uploadStatus` is the right pattern but only covers part of the timeline. Apply consistently:
-- [ ] **Packaging**: elapsed-time ticker when zip starts
-- [ ] **Zip upload / model local upload**: elapsed-time ticker (Jupyter API doesn't expose byte progress)
-- [ ] **Pod startup wait**: elapsed time in `uploadStatus` while pod-polling (currently only logged)
-- [ ] **Jupyter readiness wait**: elapsed time in `uploadStatus` while waiting for `/api/terminals`
-- [ ] **Model download on pod**: time ticker after firing nohup ("Downloading model on pod… (2m 30s)")
-- [ ] **Training**: parse step info from Kohya log and mirror into `uploadStatus` ("Training: step 450/2000 (22%)")
+### RunPod Launcher — Cleanup
+- [ ] **Remove force-download button** — escape hatch for broken completion detection. Once download flow is confirmed reliable, remove it.
+- [ ] **Download step has no overall progress indicator** — per-file ticker added, but no "file 1 of 3" counter when downloading multiple intermediates.
+- [ ] **Progress status line should be sticky/floating** — currently renders at the top of the log scroll area and scrolls off as logs accumulate. Should stay visible at the top of the log panel regardless of scroll position.
 
 ### General
 - [ ] Character preset gallery — save and reload full character configs (separate from project save)
-- [ ] **Fox's Automatic Braindead Character Describer (ABCD)** — AI-assisted tool to auto-generate core description, artist tags, and trigger word from a reference image or text prompt
+- [ ] **Fox's Automatic Braindead Character Describer (ABCD)** — potential more fun name for this app. AI-assisted tool to auto-generate core description, artist tags, and trigger word from a reference image or text prompt
 - [ ] Checkpoint local directory field on RunPod tab autofills with an incorrect value
-- [ ] Pricing on RunPod launcher page is inconsistent — Best value, price per hour, pod status marker price, and log price don't match each other
+
+---
+
+## Code Quality / Technical Debt
+
+- [ ] **Silent error swallowing in purge path** — `purgeDirectory` silences all `delete_image` errors. Acceptable for sweep operations but a count of failures would be useful UX.
+- [ ] **`lib.rs` module split** — at ~637 lines, `src-tauri/src/lib.rs` is past the threshold where splitting into submodules (`commands/forge.rs`, `commands/jupyter.rs`, etc.) would aid maintainability. Investigate before adding further Rust commands.
 
 ---
 
 ## Known Bugs
 
-- [ ] Detecting readiness of jupyter and kohya containers is slow
-- [ ] user note that training typically takes 30-90 mins is misleading. Reword to be 'training can take a long time' to avoid raising hopes of users
+- [ ] **Batch Generator: orphaned tooltip on card delete** — when a card is deleted while its tooltip is visible, the tooltip remains on screen unattached. Likely needs the tooltip to be dismissed on unmount of the card component.
 
+- [ ] Detecting readiness of jupyter and kohya containers is slow
+- [ ] Occasionally initial attempt to create and load in a pod hang at the 'waiting for Jupyter to come up' message. Linking to a running instance bypasses this issue (waited 30+ mins, confirmed it was running via manually going to jupyter url)

@@ -21,6 +21,8 @@ export default function CaptionEditor() {
   const [saveError, setSaveError] = useState<string | null>(null);
   const [disabledTags, setDisabledTags] = useState<Set<string>>(new Set());
   const [tagsExpanded, setTagsExpanded] = useState(true);
+  const [globalTagInput, setGlobalTagInput] = useState("");
+  const [addingGlobal, setAddingGlobal] = useState(false);
 
   const filtered = images.filter((img) => {
     if (filter === "approved") return img.approved === true;
@@ -80,6 +82,21 @@ export default function CaptionEditor() {
     } finally {
       setSaving(false);
     }
+  };
+
+  const addTagToAll = async () => {
+    const tag = globalTagInput.trim();
+    if (!tag) return;
+    setAddingGlobal(true);
+    for (const img of filtered) {
+      const tags = img.caption.split(",").map((t) => t.trim()).filter(Boolean);
+      if (tags.includes(tag)) continue;
+      const updated = normalizeCaption([...tags, tag].join(", "), character.triggerWord);
+      await invoke("save_caption", { imagePath: img.path, caption: updated });
+      updateImage(img.id, { caption: updated });
+    }
+    setGlobalTagInput("");
+    setAddingGlobal(false);
   };
 
   const saveAllCaptions = async () => {
@@ -160,6 +177,26 @@ export default function CaptionEditor() {
               </div>
             )}
             <div style={{ flex: 1 }} />
+            <div
+              style={{ display: "flex", gap: "5px", alignItems: "center" }}
+              onClick={(e) => e.stopPropagation()}
+            >
+              <input
+                value={globalTagInput}
+                onChange={(e) => setGlobalTagInput(e.target.value)}
+                onKeyDown={(e) => { if (e.key === "Enter") addTagToAll(); }}
+                placeholder="add tag to all…"
+                style={{ fontSize: "10px", padding: "2px 7px", width: "140px", fontFamily: "var(--font-mono)" }}
+              />
+              <button
+                className="btn-ghost"
+                onClick={addTagToAll}
+                disabled={addingGlobal || !globalTagInput.trim()}
+                style={{ fontSize: "10px", padding: "2px 10px" }}
+              >
+                {addingGlobal ? "…" : "+ All"}
+              </button>
+            </div>
             {tagsExpanded ? <ChevronUp size={12} color="var(--text-muted)" /> : <ChevronDown size={12} color="var(--text-muted)" />}
           </div>
           {tagsExpanded && (
