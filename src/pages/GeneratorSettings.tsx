@@ -1,3 +1,4 @@
+import { useEffect } from "react";
 import PageHeader from "../components/PageHeader";
 import { useStore } from "../store";
 
@@ -99,7 +100,14 @@ function SelectGrid({
 }
 
 export default function GeneratorSettings() {
-  const { generation, updateGeneration } = useStore();
+  const { generation, updateGeneration, settings } = useStore();
+  const ezMode = settings.ezMode ?? false;
+
+  useEffect(() => {
+    if (ezMode) {
+      updateGeneration({ steps: 20, cfgScale: 7, samplerName: "DPM++ 2M", scheduler: "Karras" });
+    }
+  }, [ezMode]);
 
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100%" }}>
@@ -108,7 +116,12 @@ export default function GeneratorSettings() {
         subtitle="Sampler, scheduler, steps, and CFG — applied to every generation"
       />
       <div style={{ flex: 1, overflow: "auto", padding: "24px 28px" }}>
-        <div style={{ maxWidth: "720px", display: "flex", flexDirection: "column", gap: "28px" }}>
+        {ezMode && (
+          <div style={{ marginBottom: "16px", padding: "10px 16px", background: "var(--accent-glow)", border: "1px solid var(--accent-dim)", borderRadius: "6px", fontFamily: "var(--font-mono)", fontSize: "11px", color: "var(--accent-bright)", letterSpacing: "0.04em" }}>
+            ⚡ EZ Mode — settings auto-managed. Disable EZ Mode in the sidebar to edit.
+          </div>
+        )}
+        <div style={{ maxWidth: "720px", display: "flex", flexDirection: "column", gap: "28px", opacity: ezMode ? 0.5 : 1, pointerEvents: ezMode ? "none" : "auto" }}>
 
           {/* Steps + CFG side by side */}
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "32px" }}>

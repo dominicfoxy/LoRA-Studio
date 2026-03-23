@@ -34,9 +34,12 @@ export default function App() {
   const uiScale = useStore((s) => s.settings.uiScale ?? 1.0);
   const activeTheme = useStore((s) => s.settings.activeTheme ?? "default");
   const themeFile = useStore((s) => s.settings.themeFile ?? "");
+  const ezMode = useStore((s) => s.settings.ezMode ?? false);
+  const setSettings = useStore((s) => s.setSettings);
   const approved = images.filter((i) => i.approved === true).length;
   const [showCloseDialog, setShowCloseDialog] = useState(false);
   const [saveCloseError, setSaveCloseError] = useState<string | null>(null);
+  const [savingClose, setSavingClose] = useState(false);
 
   useEffect(() => {
     document.documentElement.style.zoom = String(uiScale);
@@ -77,6 +80,8 @@ export default function App() {
   }, []);
 
   const saveAndClose = async () => {
+    if (savingClose) return;
+    setSavingClose(true);
     setSaveCloseError(null);
     const { character: c, generation, settings, images: imgs } = useStore.getState();
     if (c.outputDir) {
@@ -89,6 +94,7 @@ export default function App() {
         markSaved();
       } catch (e) {
         setSaveCloseError(`Save failed: ${e}`);
+        setSavingClose(false);
         return;
       }
     }
@@ -132,7 +138,7 @@ export default function App() {
             marginTop: "2px",
             letterSpacing: "0.08em",
           }}>
-            CHARACTER CASTING
+            LoRA Studio
           </div>
         </div>
 
@@ -223,14 +229,41 @@ export default function App() {
 
         {/* Footer */}
         <div style={{
-          padding: "12px 16px",
-          borderTop: "1px solid var(--border)",
-          fontFamily: "var(--font-mono)",
-          fontSize: "9px",
-          color: "var(--text-muted)",
-          letterSpacing: "0.06em",
+          padding: "10px 16px 12px",
+          borderTop: `1px solid ${ezMode ? "var(--accent-dim)" : "var(--border)"}`,
+          background: ezMode ? "var(--accent-glow)" : "transparent",
+          transition: "background 0.3s, border-color 0.3s",
         }}>
-          SDXL · ILLUSTRIOUS · KOHYA
+          <button
+            onClick={() => setSettings({ ezMode: !ezMode })}
+            style={{
+              width: "100%",
+              padding: "5px 8px",
+              marginBottom: "8px",
+              cursor: "pointer",
+              fontFamily: "var(--font-display)",
+              fontWeight: 700,
+              fontSize: "10px",
+              letterSpacing: "0.1em",
+              borderRadius: "5px",
+              border: `1px solid ${ezMode ? "var(--accent-bright)" : "var(--border)"}`,
+              background: ezMode ? "var(--accent-glow)" : "var(--bg-2)",
+              color: ezMode ? "var(--accent-bright)" : "var(--text-muted)",
+              boxShadow: ezMode ? "0 0 10px var(--accent-dim), inset 0 0 8px var(--accent-glow)" : "none",
+              transition: "all 0.2s",
+            }}
+          >
+            {ezMode ? "⚡ EZ MODE ON" : "EZ MODE"}
+          </button>
+          <div style={{
+            fontFamily: "var(--font-mono)",
+            fontSize: "9px",
+            color: ezMode ? "var(--accent-dim)" : "var(--text-muted)",
+            letterSpacing: "0.06em",
+            transition: "color 0.3s",
+          }}>
+            SDXL · ILLUSTRIOUS · KOHYA
+          </div>
         </div>
       </aside>
 
@@ -286,16 +319,18 @@ export default function App() {
               </button>
               <button
                 onClick={discardAndClose}
-                style={{ padding: "7px 16px", fontSize: "12px", cursor: "pointer", background: "transparent", border: "1px solid var(--red)", color: "var(--red)", borderRadius: "5px", fontFamily: "var(--font-display)", fontWeight: 600, letterSpacing: "0.05em" }}
+                disabled={savingClose}
+                style={{ padding: "7px 16px", fontSize: "12px", cursor: savingClose ? "default" : "pointer", background: "transparent", border: "1px solid var(--red)", color: "var(--red)", borderRadius: "5px", fontFamily: "var(--font-display)", fontWeight: 600, letterSpacing: "0.05em", opacity: savingClose ? 0.4 : 1 }}
               >
                 Discard &amp; Close
               </button>
               {character.outputDir && (
                 <button
                   onClick={saveAndClose}
-                  style={{ padding: "7px 16px", fontSize: "12px", cursor: "pointer", background: "var(--accent)", border: "none", color: "white", borderRadius: "5px", fontFamily: "var(--font-display)", fontWeight: 700, letterSpacing: "0.05em" }}
+                  disabled={savingClose}
+                  style={{ padding: "7px 16px", fontSize: "12px", cursor: savingClose ? "default" : "pointer", background: "var(--accent)", border: "none", color: "white", borderRadius: "5px", fontFamily: "var(--font-display)", fontWeight: 700, letterSpacing: "0.05em", opacity: savingClose ? 0.7 : 1 }}
                 >
-                  Save &amp; Close
+                  {savingClose ? "Saving…" : "Save & Close"}
                 </button>
               )}
             </div>

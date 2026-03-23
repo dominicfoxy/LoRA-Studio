@@ -1,8 +1,32 @@
 # LoRA Studio — Changelog
 
+## [v1.0.6-alpha]
+
+- **EZ Mode** — beginner-friendly toggle in the sidebar footer. When active, all technical fields are locked (disabled + dimmed) with auto-computed values, and sensible defaults are applied automatically. Covers RunPodLauncher (hyperparameters, GPU, cloud type), GeneratorSettings (steps, CFG, sampler, scheduler), ShotList (image size, count, embeddings, LoRA weights), and BatchGenerator (mode, requeue, purge). A simplified log view replaces raw Kohya output with a large step counter + progress bar. Hover tooltips on locked fields explain the auto value and how to unlock. Store migrated to v20.
+- **"Sensible defaults" button in Training Hyperparameters** — auto-populates optimizer, LRs, dim, alpha, resolution, noise offset, min SNR gamma, and steps based on model type (SDXL/SD1.5) and approved image count. Step formula: `images × 60` clamped 1500–3000 for SDXL; `images × 40` clamped 1000–2000 for SD1.5. Step suggestion hint updated to match (was `images × 100`).
+- **Prodigy / DAdaptAdam: expose `d_coef` and `weight_decay` in UI** — previously hardcoded at `d_coef=2` and `weight_decay=0.01`. Both are now user-configurable fields shown when an adaptive optimizer is selected (`d_coef` is Prodigy-only). Prodigy also now includes `safeguard_warmup=True` in optimizer args. Store migrated to v19.
+- **Confirmation dialogs now disable underlying action buttons** — while any confirm banner is visible in BatchGenerator (purge, generate, large queue), the Generate/Purge/Requeue/Stop buttons are disabled to prevent accidental double-fires. Applied consistently across all pages: RunPodLauncher Terminate button now has a `terminating` in-progress state; Force Download and Retry Download disabled while a download is active; Launch Pod opacity-only disable bug fixed (was visual-only, button was still clickable). CharacterSetup New Character button disabled while its confirm banner is shown. App close dialog Save/Discard buttons disabled during save to prevent double-invocations.
+- **Large batch confirmation** — queues over 50 images now prompt before generating, with a note that LoRAs typically train well on 20–50 images. Proceeding runs the already-built queue without rebuilding it.
+- **Jupyter readiness detection is now fast and hang-resistant** — `jupyter_is_ready` was calling the full login flow (3 HTTP requests, 60s timeout each), so each failed probe could block for minutes and concurrent calls piled up. Now uses a single lightweight GET to `/login` with an 8s timeout. Frontend poll interval reduced from 15s to 5s, first check fires immediately on `startJupyterWait` instead of waiting for the first tick, and an overlap guard prevents concurrent calls if a check takes longer than the interval.
+- **"Waiting for pod to start" ticker no longer sticks when linking to a running pod** — fix: `stopPodTicker()` now always fires when the pod is seen as RUNNING, regardless of ref state.
+- **Kohya docker image pinned to `ashleykza/kohya:25.2.1`** — default was `ashleykza/kohya:latest`; `KOHYA_POD_TEMPLATE` had the defunct `ashleykza/kohya-ss:latest`. Pinning prevents silent breakage when the upstream image is updated. Store v20→21 migration updates existing users still on a `:latest` variant. To upgrade intentionally, change the Docker Image field in Settings.
+- **`base64ToBytes` now throws a readable error on malformed Forge responses** — `atob()` exceptions were uncaught and would surface as a cryptic JS error. Now wrapped in try/catch with a clear message that propagates to the generation error banner.
+- **Training log line numbers stripped more completely** — now strips leading timestamp and `LEVEL     source.py:N: ` prefix in addition to trailing `\tfilename.py:N`.
+- **Width/height validated before batch generation** — invalid dimensions (zero or not divisible by 8) now show a clear error pointing to Sampler settings.
+- **Download log message now accounts for filtered intermediates** — now shows `skipping N intermediate(s)` count when intermediates are filtered out.
+- **Copy Training Command now shows the correct model filename** — was using `config.baseModelLocalPath / baseModelDownloadUrl`; now uses `character.baseModel` to match the actual launch path.
+- **Purge failures now surfaced when using "purge and generate"** — failure count now shown via the same banner as the standalone purge.
+- **App icon** — updated to new couch artwork.
+- **LICENSE file** — PolyForm Noncommercial 1.0.0 added to repo root.
+- **Disclaimer** — "not affiliated with" and "provided as-is" text added to README and Settings About section.
+
+---
+
 ## [v1.0.5a-alpha]
 
 - **Link pod now runs `checkAndResume` instead of re-uploading** — the "Link" button on detected running pods was routing through `startJupyterWait` → `uploadToVolume`, ignoring `.extract_done` / `.model_manifest` and always re-uploading the dataset and config. It now calls `checkAndResume` once Jupyter is ready, matching the reconnect path.
+- **Training step counter shows global progress, not per-epoch** — Kohya outputs two tqdm bars (per-epoch and global). The status line was picking up the per-epoch bar (`0/41`) instead of the global one (`0/1500`). Now tracks the largest total seen across tqdm lines and only updates the status when the current bar's total matches that maximum.
+- **`checkAndResume` no longer triggers false download mid-training** — was checking for any `.safetensors` in `/workspace/output/`, which includes intermediate checkpoint saves. Now checks the `.training_done` sentinel (only written on clean training exit). If dataset and model are ready but training is not done, resumes log polling instead of relaunching or downloading prematurely.
 - **Stale status ticker on upload/download error fixed** — if a zip upload, model upload, or LoRA download failed mid-transfer, the elapsed-time ticker kept running and overwrote the cleared status line with a stale "Uploading… (Xs)" every second. All three ticker usages are now wrapped in try/finally so the interval is always cleared on error. `downloadOutputs` error path also now clears `uploadStatus`.
 
 ---

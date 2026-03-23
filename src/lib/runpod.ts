@@ -208,7 +208,7 @@ export function gpuTrainingFlags(vramGb: number, optimizer?: string): GpuTrainin
 
 // Kohya training pod template
 export const KOHYA_POD_TEMPLATE = {
-  imageName: "ashleykza/kohya-ss:latest",
+  imageName: "ashleykza/kohya:25.2.1",
   containerDiskInGb: 10,
   volumeInGb: 30,
   volumeMountPath: "/workspace",

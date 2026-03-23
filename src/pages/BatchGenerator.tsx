@@ -284,6 +284,9 @@ export default function BatchGenerator() {
   const [thumbSize, setThumbSize] = useState(220);
   const [confirmPurge, setConfirmPurge] = useState(false);
   const [confirmGenerate, setConfirmGenerate] = useState(false);
+  const [confirmLargeQueue, setConfirmLargeQueue] = useState(false);
+  const [largeQueueSize, setLargeQueueSize] = useState(0);
+  const pendingLargeQueue = useRef<typeof liveQueueRef.current>(null);
   const [purgeFailCount, setPurgeFailCount] = useState(0);
   const [approvedExpanded, setApprovedExpanded] = useState(false);
   const [autoRequeue, setAutoRequeue] = useState(false);
@@ -294,6 +297,16 @@ export default function BatchGenerator() {
   const [focusedId, setFocusedId] = useState<string | null>(null);
   const focusedImg = images.find((i) => i.id === focusedId) ?? null;
 
+  const ezMode = settings.ezMode ?? false;
+
+  useEffect(() => {
+    if (ezMode) {
+      setAutoRequeue(true);
+      updateGeneration({ genMode: "all" });
+    }
+  }, [ezMode]);
+
+  const anyConfirm = confirmPurge || confirmGenerate || confirmLargeQueue;
   const pending = images.filter((i) => i.approved === null);
   const approved = images.filter((i) => i.approved === true);
   const rejected = images.filter((i) => i.approved === false);
@@ -406,6 +419,15 @@ export default function BatchGenerator() {
     );
 
     if (queue.length === 0) return setLastError("Add at least one variant on the Shot List page first.");
+    if (!generation.width || !generation.height || generation.width % 8 !== 0 || generation.height % 8 !== 0)
+      return setLastError(`Invalid dimensions ${generation.width}×${generation.height} — must be non-zero and divisible by 8. Fix in Sampler settings.`);
+    if (queue.length > 50 && !pendingLargeQueue.current) {
+      pendingLargeQueue.current = queue;
+      setLargeQueueSize(queue.length);
+      setConfirmLargeQueue(true);
+      return;
+    }
+    pendingLargeQueue.current = null;
     await runGeneration(queue);
   };
 
@@ -458,7 +480,8 @@ export default function BatchGenerator() {
 
   const purgeAndGenerate = async () => {
     setConfirmGenerate(false);
-    await purgeDirectory();
+    const failures = await purgeDirectory();
+    if (failures > 0) setPurgeFailCount(failures);
     generateAll();
   };
 
@@ -522,7 +545,7 @@ export default function BatchGenerator() {
                 style={{ width: "80px", accentColor: "var(--accent)" }} />
             </div>
             {/* Generation mode */}
-            <div style={{ display: "flex", alignItems: "center", gap: "4px" }}>
+            <div style={{ display: "flex", alignItems: "center", gap: "4px", opacity: ezMode ? 0.4 : 1, pointerEvents: ezMode ? "none" : "auto" }}>
               {(["all", "random"] as const).map((m) => (
                 <button key={m} onClick={() => updateGeneration({ genMode: m })} style={{
                   padding: "4px 10px", fontSize: "10px",
@@ -548,14 +571,16 @@ export default function BatchGenerator() {
             {/* Auto-requeue toggle */}
             <button
               onClick={() => setAutoRequeue(!autoRequeue)}
+              disabled={ezMode}
               style={{
                 padding: "4px 10px", fontSize: "10px",
                 background: autoRequeue ? "rgba(74,154,106,0.15)" : "var(--bg-3)",
                 border: `1px solid ${autoRequeue ? "var(--green)" : "var(--border)"}`,
                 color: autoRequeue ? "var(--green)" : "var(--text-muted)",
-                borderRadius: "3px", cursor: "pointer",
+                borderRadius: "3px", cursor: ezMode ? "default" : "pointer",
                 fontFamily: "var(--font-display)", fontWeight: 600,
                 letterSpacing: "0.05em", textTransform: "uppercase",
+                opacity: ezMode ? 0.4 : 1,
               }}
               title="Automatically requeue rejected images while generation is running"
             >
@@ -571,24 +596,24 @@ export default function BatchGenerator() {
                 <button className="btn-ghost" onClick={() => setSelectedIds(new Set())} style={{ padding: "4px 10px", fontSize: "10px" }}>Clear</button>
               </>
             )}
-            {images.length > 0 && !generationRunning && (
-              <button className="btn-danger" onClick={() => setConfirmPurge(true)} style={{ opacity: 0.8 }}>
+            {images.length > 0 && !generationRunning && !ezMode && (
+              <button className="btn-danger" disabled={anyConfirm} onClick={() => setConfirmPurge(true)} style={{ opacity: anyConfirm ? 0.4 : 0.8 }}>
                 <Trash2 size={12} style={{ display: "inline", marginRight: "5px" }} />
                 Purge
               </button>
             )}
             {rejected.length > 0 && !generationRunning && (
-              <button className="btn-primary" onClick={requeueRejected}>
+              <button className="btn-primary" disabled={anyConfirm} onClick={requeueRejected}>
                 <RotateCcw size={12} style={{ display: "inline", marginRight: "5px" }} />
                 Requeue {rejected.length}
               </button>
             )}
             {generationRunning ? (
-              <button className="btn-danger" onClick={() => { abortRef.current = true; }}>
+              <button className="btn-danger" disabled={anyConfirm} onClick={() => { abortRef.current = true; }}>
                 <Square size={12} style={{ display: "inline", marginRight: "5px" }} />Stop
               </button>
             ) : (
-              <button className="btn-primary" onClick={handleGenerateClick}>
+              <button className="btn-primary" disabled={anyConfirm} onClick={handleGenerateClick}>
                 <Play size={12} style={{ display: "inline", marginRight: "5px" }} />Generate All Shots
               </button>
             )}
@@ -647,6 +672,26 @@ export default function BatchGenerator() {
             letterSpacing: "0.04em", whiteSpace: "nowrap",
           }}>Purge &amp; redo</button>
           <button onClick={() => setConfirmGenerate(false)} style={{
+            padding: "5px 14px", fontSize: "11px", cursor: "pointer",
+            background: "transparent", border: "1px solid var(--border)",
+            color: "var(--text-muted)", borderRadius: "4px",
+            fontFamily: "var(--font-display)", fontWeight: 600, letterSpacing: "0.04em",
+          }}>Cancel</button>
+        </div>
+      )}
+
+      {confirmLargeQueue && (
+        <div style={{ padding: "12px 28px", background: "var(--accent-glow)", borderBottom: "1px solid var(--accent-dim)", flexShrink: 0, display: "flex", alignItems: "center", gap: "10px", flexWrap: "wrap" }}>
+          <span style={{ fontFamily: "var(--font-mono)", fontSize: "11px", color: "var(--accent-bright)", flex: 1, minWidth: "200px" }}>
+            {largeQueueSize} images queued — that's a large batch. LoRAs typically train well on 20–50 images.
+          </span>
+          <button onClick={async () => { setConfirmLargeQueue(false); const q = pendingLargeQueue.current; pendingLargeQueue.current = null; if (q) await runGeneration(q); }} style={{
+            padding: "5px 14px", fontSize: "11px", cursor: "pointer",
+            background: "var(--accent-glow)", border: "1px solid var(--accent-dim)",
+            color: "var(--accent-bright)", borderRadius: "4px",
+            fontFamily: "var(--font-display)", fontWeight: 600, letterSpacing: "0.04em", whiteSpace: "nowrap",
+          }}>Generate anyway</button>
+          <button onClick={() => { setConfirmLargeQueue(false); pendingLargeQueue.current = null; }} style={{
             padding: "5px 14px", fontSize: "11px", cursor: "pointer",
             background: "transparent", border: "1px solid var(--border)",
             color: "var(--text-muted)", borderRadius: "4px",

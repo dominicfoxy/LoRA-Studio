@@ -390,18 +390,22 @@ async fn jupyter_client_login(jupyter_url: &str, password: &str) -> Result<(reqw
 }
 
 #[tauri::command]
-async fn jupyter_is_ready(jupyter_url: String, password: String) -> bool {
-    // Login and check the terminal API — confirms Jupyter is fully up, not just the login page
-    match jupyter_client_login(&jupyter_url, &password).await {
-        Ok((client, _xsrf, cookie_header)) => {
-            client.get(format!("{}/api/terminals", jupyter_url))
-                .header("Cookie", &cookie_header)
-                .send().await
-                .map(|r| r.status().is_success())
-                .unwrap_or(false)
-        }
-        Err(_) => false,
-    }
+async fn jupyter_is_ready(jupyter_url: String, _password: String) -> bool {
+    // Lightweight readiness probe — single GET to the login page with a short timeout.
+    // If Jupyter is listening and returning HTTP (any non-5xx), it's ready.
+    // Avoids the 3-request / 60s-timeout login flow, which caused slow detection and
+    // pileup when the server wasn't yet responding.
+    let client = match reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(8))
+        .build()
+    {
+        Ok(c) => c,
+        Err(_) => return false,
+    };
+    client.get(format!("{}/login", jupyter_url))
+        .send().await
+        .map(|r| r.status().as_u16() < 500)
+        .unwrap_or(false)
 }
 
 #[tauri::command]

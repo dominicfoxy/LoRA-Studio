@@ -542,9 +542,21 @@ function LoraBrowser({ onInsert }: { onInsert: (tag: string) => void }) {
 
 // ── Settings Panel ─────────────────────────────────────────────────────────────
 function SettingsPanel() {
-  const { generation, updateGeneration, character } = useStore();
+  const { generation, updateGeneration, character, settings } = useStore();
+  const training = useStore((s) => s.training);
+  const ezMode = settings.ezMode ?? false;
   const [showLoras, setShowLoras] = useState(false);
   const [collapsed, setCollapsed] = useState(false);
+
+  useEffect(() => {
+    if (ezMode) {
+      updateGeneration({
+        width: training?.sdxl !== false ? 1024 : 512,
+        height: training?.sdxl !== false ? 1024 : 512,
+        count: 1,
+      });
+    }
+  }, [ezMode]);
 
   return (
     <div style={{ border: "1px solid var(--border)", borderRadius: "8px", marginBottom: "12px", overflow: "hidden" }}>
@@ -553,13 +565,14 @@ function SettingsPanel() {
         style={{ display: "flex", alignItems: "center", gap: "10px", padding: "10px 16px", cursor: "pointer", background: "var(--bg-3)", userSelect: "none" }}
       >
         <div style={{ fontFamily: "var(--font-mono)", fontSize: "10px", color: "var(--text-muted)", textTransform: "uppercase", letterSpacing: "0.12em", fontWeight: 700 }}>Settings</div>
+        {ezMode && <div style={{ fontFamily: "var(--font-mono)", fontSize: "9px", color: "var(--accent-bright)", background: "var(--accent-glow)", border: "1px solid var(--accent-dim)", borderRadius: "3px", padding: "1px 6px", letterSpacing: "0.1em" }}>EZ</div>}
         <div style={{ flex: 1 }} />
         {collapsed ? <ChevronDown size={13} color="var(--text-muted)" /> : <ChevronUp size={13} color="var(--text-muted)" />}
       </div>
 
       {!collapsed && (
         <div style={{ padding: "16px" }}>
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "16px" }}>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "16px", opacity: ezMode ? 0.5 : 1, pointerEvents: ezMode ? "none" : "auto" }}>
             {/* Size */}
             <div>
               <div className="section-label">Image Size</div>
@@ -816,7 +829,8 @@ function DynamicPromptsPanel({
 
 // ── Page ───────────────────────────────────────────────────────────────────────
 export default function ShotList() {
-  const { generation, updateGeneration, character, images, updateImage, projectLoadCount } = useStore();
+  const { generation, updateGeneration, character, images, updateImage, projectLoadCount, settings } = useStore();
+  const ezMode = settings.ezMode ?? false;
   const [loraFiles, setLoraFiles] = useState<{ name: string; path: string; dir: string }[]>([]);
 
   // Track committed outfit trigger words to detect changes
@@ -967,7 +981,7 @@ export default function ShotList() {
           </div>
         </div>
 
-        <DynamicPromptsPanel character={character} generation={generation} />
+        {!ezMode && <DynamicPromptsPanel character={character} generation={generation} />}
       </div>
     </div>
   );

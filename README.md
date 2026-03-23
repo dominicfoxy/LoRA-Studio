@@ -156,3 +156,18 @@ output_dir/
 - **Forge API**: A1111-compatible REST (`/sdapi/v1/txt2img`)
 - **RunPod API**: GraphQL (`api.runpod.io/graphql`)
 - **Trainer**: Kohya sd-scripts on RunPod pod
+
+## Disclaimer
+
+This software is provided as-is, without warranty of any kind. You are solely responsible for the content you generate, the models you train, and how those models are used. Ensure your use complies with the terms of service of any third-party services (RunPod, image generation APIs, model licences, etc.) and applicable law.
+
+This project is not affiliated with, endorsed by, or associated with:
+- [RunPod](https://runpod.io)
+- Stability AI
+- [AUTOMATIC1111 / Forge WebUI](https://github.com/lllyasviel/stable-diffusion-webui-forge)
+- [Kohya SS](https://github.com/kohya-ss/sd-scripts)
+- Anthropic
+
+## License
+
+This project is licensed under the [PolyForm Noncommercial License 1.0.0](LICENSE) — free for personal and non-commercial use.

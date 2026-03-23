@@ -75,6 +75,7 @@ export default function RunPodLauncher() {
   };
   const [trainingHalted, setTrainingHalted] = useState(false);
   const [downloadFailed, setDownloadFailed] = useState(false);
+  const [terminating, setTerminating] = useState(false);
   const [modelQuery, setModelQuery] = useState("");
   const [modelResults, setModelResults] = useState<SearchResult[]>([]);
   const [modelLoading, setModelLoading] = useState(false);
@@ -165,21 +166,21 @@ export default function RunPodLauncher() {
       const modelReady = manifestResult.status === "fulfilled";
 
       if (datasetReady && modelReady) {
-        // Check if training already produced output before relaunching
-        const outputFiles = await invoke<string[]>("jupyter_list_dir", { jupyterUrl: jUrl, password: JUPYTER_PASS, remotePath: "workspace/output" }).catch(() => []);
-        if (outputFiles.some(n => n.endsWith(".safetensors"))) {
-          log("Training output already exists — downloading instead of relaunching…");
+        // Use .training_done sentinel (written only on clean exit) — not output files,
+        // which include intermediates and would trigger a false download mid-training.
+        const trainingDone = await invoke<string>("jupyter_read_file", { jupyterUrl: jUrl, password: JUPYTER_PASS, remotePath: "workspace/.training_done" }).catch(() => null);
+        if (trainingDone !== null) {
+          log("Training already completed — downloading instead of relaunching…");
           setPipelineStep(3);
           setUploadStatus(null);
           await downloadOutputs(jUrl);
           return;
         }
-        const selectedVram = RECOMMENDED_GPUS.find(g => g.id === config.gpuTypeId)?.vram ?? 0;
-        const gpuFlags = gpuTrainingFlags(selectedVram, config.optimizer);
-        log("Dataset and model already on pod — launching training directly…");
+        // Training not complete — resume log polling; it will detect completion or failure
+        log("Dataset and model on pod, training not yet complete — resuming log monitor…");
         setPipelineStep(3);
         setUploadStatus(null);
-        await launchTraining(jUrl, modelBaseName, gpuFlags);
+        startLogPolling(jUrl, 0);
         return;
       }
 
@@ -470,32 +471,72 @@ export default function RunPodLauncher() {
     // prevents a duplicate call before the first jupyter_is_ready check fires
     jupyterUrlRef.current = url;
     let attempts = 0;
+    let checking = false; // prevent overlapping calls if a check takes longer than the interval
     log(`Waiting for Jupyter to come up…`);
     const stopJupyterTicker = startTicker("Waiting for Jupyter…");
-    _jupyterWaitId = setInterval(async () => {
+
+    const check = async () => {
+      if (checking) return;
+      checking = true;
       attempts++;
-      const ready = await invoke<boolean>("jupyter_is_ready", { jupyterUrl: url, password: "lorastudio" });
-      if (ready) {
-        if (_jupyterWaitId) { clearInterval(_jupyterWaitId); _jupyterWaitId = null; }
-        stopJupyterTicker();
-        if (opts.checkFirst) {
-          log(`Jupyter ready — checking pod state…`);
-          checkAndResume(url);
-        } else {
-          log(`Jupyter ready — starting upload…`);
-          uploadToVolume(url);
+      try {
+        const ready = await invoke<boolean>("jupyter_is_ready", { jupyterUrl: url, password: "lorastudio" });
+        if (ready) {
+          if (_jupyterWaitId) { clearInterval(_jupyterWaitId); _jupyterWaitId = null; }
+          stopJupyterTicker();
+          if (opts.checkFirst) {
+            log(`Jupyter ready — checking pod state…`);
+            checkAndResume(url);
+          } else {
+            log(`Jupyter ready — starting upload…`);
+            uploadToVolume(url);
+          }
+        } else if (attempts >= 120) {
+          // 120 × 5s = 10 min timeout
+          if (_jupyterWaitId) { clearInterval(_jupyterWaitId); _jupyterWaitId = null; }
+          stopJupyterTicker();
+          log(`Jupyter unreachable after 10 min — pod may still be starting. Open ${url}/lab to check manually.`);
         }
-      } else if (attempts >= 48) {
-        if (_jupyterWaitId) { clearInterval(_jupyterWaitId); _jupyterWaitId = null; }
-        stopJupyterTicker();
-        log(`Jupyter unreachable after 12 min — pod may still be starting. Open ${url}/lab to check manually.`);
+      } finally {
+        checking = false;
       }
-    }, 15000);
+    };
+
+    check(); // fire immediately — don't wait for first interval tick
+    _jupyterWaitId = setInterval(check, 5000);
   };
+
+  const applySensibleDefaults = () => {
+    const suggestedSteps = approved.length > 0
+      ? config.sdxl
+        ? Math.max(1500, Math.min(3000, Math.round(approved.length * 60 / 100) * 100))
+        : Math.max(1000, Math.min(2000, Math.round(approved.length * 40 / 100) * 100))
+      : config.sdxl ? 1500 : 1200;
+    setConfig({
+      optimizer: "AdamW8bit",
+      unetLr: config.sdxl ? "5e-5" : "1e-4",
+      textEncoderLr: config.sdxl ? "1e-5" : "5e-5",
+      networkDim: config.sdxl ? 32 : 64,
+      networkAlpha: config.sdxl ? 16 : 32,
+      resolution: config.sdxl ? 1024 : 512,
+      noiseOffset: config.sdxl ? 0 : 0.0357,
+      minSnrGamma: 5,
+      // vPrediction intentionally not set — it's model-specific and can't be inferred
+      // from SDXL/SD1.5 alone (NoobAI-XL, Pony variants, 3wolfmond all require it)
+      steps: suggestedSteps,
+      prodigyDCoef: 2,
+      weightDecay: 0.01,
+      containerDiskInGb: 40,
+    });
+  };
+
+  // Auto-apply sensible defaults when EZ mode is enabled
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(() => { if (settings.ezMode) applySensibleDefaults(); }, [settings.ezMode]);
 
   const buildTrainingCommand = () => {
     const previewModelBaseName = sanitizeShellArg(
-      (config.baseModelLocalPath || config.baseModelDownloadUrl || "model.safetensors")
+      (character.baseModel || "model.safetensors")
         .replace(/\s*\[.*?\]\s*$/, "").trim().split(/[\\/]/).pop() || "model.safetensors"
     );
     const selectedVram = RECOMMENDED_GPUS.find(g => g.id === config.gpuTypeId)?.vram ?? 0;
@@ -509,9 +550,9 @@ export default function RunPodLauncher() {
     const lrWarmupSteps = isAdaptive ? 0 : Math.round(config.steps * 0.05);
     const lrWarmupFlag = isAdaptive ? "" : `--lr_warmup_steps ${lrWarmupSteps}`;
     const optimizerArgs = config.optimizer === "Prodigy"
-      ? `--optimizer_args "decouple=True" "weight_decay=0.01" "d_coef=2" "use_bias_correction=True"`
+      ? `--optimizer_args "decouple=True" "weight_decay=${config.weightDecay}" "d_coef=${config.prodigyDCoef}" "use_bias_correction=True" "safeguard_warmup=True"`
       : config.optimizer === "DAdaptAdam"
-      ? `--optimizer_args "decouple=True" "weight_decay=0.01"`
+      ? `--optimizer_args "decouple=True" "weight_decay=${config.weightDecay}"`
       : "";
     const saveEveryNSteps = Math.max(100, Math.round(config.steps / 20));
     const trainScript = config.sdxl ? "sdxl_train_network.py" : "train_network.py";
@@ -571,9 +612,9 @@ export default function RunPodLauncher() {
     const lrWarmupSteps = isAdaptive ? 0 : Math.round(config.steps * 0.05);
     const lrWarmupFlag = isAdaptive ? "" : `--lr_warmup_steps ${lrWarmupSteps}`;
     const optimizerArgs = config.optimizer === "Prodigy"
-      ? `--optimizer_args "decouple=True" "weight_decay=0.01" "d_coef=2" "use_bias_correction=True"`
+      ? `--optimizer_args "decouple=True" "weight_decay=${config.weightDecay}" "d_coef=${config.prodigyDCoef}" "use_bias_correction=True" "safeguard_warmup=True"`
       : config.optimizer === "DAdaptAdam"
-      ? `--optimizer_args "decouple=True" "weight_decay=0.01"`
+      ? `--optimizer_args "decouple=True" "weight_decay=${config.weightDecay}"`
       : "";
     const saveEveryNSteps = Math.max(100, Math.round(config.steps / 20));
     const trainScript = config.sdxl ? "sdxl_train_network.py" : "train_network.py";
@@ -791,7 +832,8 @@ export default function RunPodLauncher() {
         ? files
         : files.filter(f => !/-step\d+/.test(f));
 
-      log(`Found ${files.length} file(s), downloading ${toDownload.length}…`);
+      const skipped = files.length - toDownload.length;
+      log(`Found ${files.length} file(s)${skipped > 0 ? `, skipping ${skipped} intermediate(s)` : ""} — downloading ${toDownload.length}…`);
       for (let i = 0; i < toDownload.length; i++) {
         const remotePath = toDownload[i];
         const filename = remotePath.split("/").pop()!;
@@ -840,6 +882,7 @@ export default function RunPodLauncher() {
     let seenLines = fromLine;
     let inTraceback = false;
     let detected = false;
+    let tqdmMaxTotal = 0; // tracks largest tqdm total seen — used to ignore per-epoch bars
 
     // Called at most once — prevents double-download if both sentinel and log detect completion
     const triggerCompletion = () => {
@@ -873,7 +916,10 @@ export default function RunPodLauncher() {
 
         let lastPodLine = "";
         for (const raw of newLines) {
-          const line = raw.trimEnd().replace(/\t\S+\.py:\d+$/, "");
+          const line = raw.trimEnd()
+            .replace(/\t\S+\.py:\d+$/, "")                                       // trailing tab+file:line
+            .replace(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d+\s+/, "")        // leading timestamp
+            .replace(/^(DEBUG|INFO|WARNING|ERROR|CRITICAL)\s+\S+\.py:\d+:\s*/i, ""); // level + source ref
           if (!line) { inTraceback = false; continue; }
           // Skip tqdm progress-bar lines (contain block chars or bare percentage bars)
           // But first extract step progress to mirror into the status line
@@ -881,7 +927,9 @@ export default function RunPodLauncher() {
             const m = line.match(/(\d+)\/(\d+)/);
             if (m) {
               const cur = parseInt(m[1]), total = parseInt(m[2]);
-              if (total > 0 && cur <= total)
+              if (total > tqdmMaxTotal) tqdmMaxTotal = total;
+              // Only update status for the global bar (largest total seen) — ignore per-epoch bars
+              if (total === tqdmMaxTotal && total > 0 && cur <= total)
                 setUploadStatus(`Training: step ${cur}/${total} (${Math.round(cur / total * 100)}%)`);
             }
             continue;
@@ -956,9 +1004,12 @@ export default function RunPodLauncher() {
           const uptime = updated.runtime?.uptimeInSeconds ?? 0;
           const url = `https://${updated.id}-8888.proxy.runpod.net`;
           setJupyterUrl(url);
+          // Always stop the pod-start ticker once the pod is running — including the
+          // linkPod path where startJupyterWait sets jupyterUrlRef.current before this
+          // tick fires, which previously caused the guard below to skip stopPodTicker().
+          stopPodTicker();
           // Only start readiness polling once the pod has real uptime (Docker is running)
           if (!jupyterUrlRef.current && uptime > 0) {
-            stopPodTicker();
             jupyterUrlRef.current = url;
             log(`Pod running (uptime: ${uptime}s) — waiting for Jupyter…`);
             startJupyterWait(url);
@@ -991,8 +1042,8 @@ export default function RunPodLauncher() {
   };
 
   const terminateCurrentPod = async () => {
-    if (!pod) return;
-    
+    if (!pod || terminating) return;
+    setTerminating(true);
     try {
       await terminatePod(settings.runpodApiKey, pod.id);
       log(`Pod ${pod.id} terminated.`);
@@ -1000,6 +1051,8 @@ export default function RunPodLauncher() {
       setPhase("done");
     } catch (err) {
       log(`Terminate error: ${err}`);
+    } finally {
+      setTerminating(false);
     }
   };
 
@@ -1439,21 +1492,38 @@ export default function RunPodLauncher() {
           {/* Training hyperparams */}
           <div style={{ marginBottom: "20px" }}>
             <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: "6px" }}>
-              <div className="section-label" style={{ margin: 0 }}>Training Hyperparameters</div>
-              <div style={{ display: "flex", gap: "4px" }}>
+              <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
+                <div className="section-label" style={{ margin: 0 }}>Training Hyperparameters</div>
+                {settings.ezMode && (
+                  <span style={{ fontFamily: "var(--font-mono)", fontSize: "8px", letterSpacing: "0.08em", color: "var(--accent-bright)", background: "var(--accent-glow)", border: "1px solid var(--accent-dim)", borderRadius: "3px", padding: "1px 5px" }}>EZ</span>
+                )}
+              </div>
+              <div style={{ display: "flex", gap: "4px", alignItems: "center" }}>
+                <button
+                  onClick={applySensibleDefaults}
+                  style={{
+                    padding: "2px 8px", fontSize: "9px", cursor: "pointer",
+                    background: "var(--bg-2)", border: "1px solid var(--border)",
+                    color: "var(--text-muted)", borderRadius: "4px",
+                    fontFamily: "var(--font-mono)", letterSpacing: "0.04em",
+                  }}
+                  title="Auto-populate with recommended settings for this model type and dataset size"
+                >↺ defaults</button>
                 {(["SDXL", "SD 1.5"] as const).map((label) => {
                   const isXL = label === "SDXL";
                   const active = config.sdxl === isXL;
                   return (
                     <button
                       key={label}
-                      onClick={() => setConfig({ sdxl: isXL })}
+                      onClick={() => !settings.ezMode && setConfig({ sdxl: isXL })}
+                      disabled={settings.ezMode}
+                      title={settings.ezMode ? "Disable EZ Mode to edit" : undefined}
                       style={{
-                        padding: "2px 8px", fontSize: "10px", cursor: "pointer",
+                        padding: "2px 8px", fontSize: "10px", cursor: settings.ezMode ? "default" : "pointer",
                         background: active ? "var(--bg-4)" : "var(--bg-2)",
                         border: `1px solid ${active ? "var(--accent-dim)" : "var(--border)"}`,
                         color: active ? "var(--accent-bright)" : "var(--text-muted)",
-                        borderRadius: "4px",
+                        borderRadius: "4px", opacity: settings.ezMode ? 0.5 : 1,
                         fontFamily: "var(--font-display)", fontWeight: 600, letterSpacing: "0.06em",
                       }}
                     >{label}</button>
@@ -1486,13 +1556,15 @@ export default function RunPodLauncher() {
               {(["AdamW8bit", "Prodigy", "DAdaptAdam"] as const).map((opt) => (
                 <button
                   key={opt}
-                  onClick={() => setConfig({ optimizer: opt })}
+                  onClick={() => !settings.ezMode && setConfig({ optimizer: opt })}
+                  disabled={settings.ezMode}
+                  title={settings.ezMode ? "Disable EZ Mode to edit" : undefined}
                   style={{
-                    flex: 1, padding: "4px 6px", fontSize: "10px", cursor: "pointer",
+                    flex: 1, padding: "4px 6px", fontSize: "10px", cursor: settings.ezMode ? "default" : "pointer",
                     background: config.optimizer === opt ? "var(--bg-4)" : "var(--bg-2)",
                     border: `1px solid ${config.optimizer === opt ? "var(--accent-dim)" : "var(--border)"}`,
                     color: config.optimizer === opt ? "var(--accent-bright)" : "var(--text-muted)",
-                    borderRadius: "4px",
+                    borderRadius: "4px", opacity: settings.ezMode ? 0.5 : 1,
                     fontFamily: "var(--font-display)", fontWeight: 600, letterSpacing: "0.04em",
                   }}
                 >{opt}</button>
@@ -1501,6 +1573,37 @@ export default function RunPodLauncher() {
             {(config.optimizer === "Prodigy" || config.optimizer === "DAdaptAdam") && (
               <div style={{ fontFamily: "var(--font-mono)", fontSize: "9px", color: "var(--accent-dim)", marginBottom: "6px", lineHeight: 1.5 }}>
                 Adaptive optimizer — LR auto-managed at 1.0 · alpha forced to 1 · scheduler set to constant
+              </div>
+            )}
+            {(config.optimizer === "Prodigy" || config.optimizer === "DAdaptAdam") && (
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "8px", marginBottom: "6px" }}>
+                {config.optimizer === "Prodigy" && (
+                  <div>
+                    <div style={{ fontFamily: "var(--font-mono)", fontSize: "9px", color: "var(--text-muted)", marginBottom: "3px", letterSpacing: "0.06em", textTransform: "uppercase" }}>D Coef</div>
+                    <input
+                      type="number"
+                      step="0.1"
+                      style={{ width: "100%", opacity: settings.ezMode ? 0.4 : 1 }}
+                      value={config.prodigyDCoef}
+                      onChange={(e) => setConfig({ prodigyDCoef: parseFloat(e.target.value) || 1 })}
+                      disabled={settings.ezMode}
+                      title={settings.ezMode ? "Disable EZ Mode to edit" : undefined}
+                    />
+                    <div style={{ fontFamily: "var(--font-body)", fontSize: "10px", color: "var(--text-muted)", marginTop: "2px" }}>LR scale (0.5 = slow, 2 = fast)</div>
+                  </div>
+                )}
+                <div>
+                  <div style={{ fontFamily: "var(--font-mono)", fontSize: "9px", color: "var(--text-muted)", marginBottom: "3px", letterSpacing: "0.06em", textTransform: "uppercase" }}>Weight Decay</div>
+                  <input
+                    type="number"
+                    step="0.001"
+                    style={{ width: "100%", opacity: settings.ezMode ? 0.4 : 1 }}
+                    value={config.weightDecay}
+                    onChange={(e) => setConfig({ weightDecay: parseFloat(e.target.value) || 0 })}
+                    disabled={settings.ezMode}
+                    title={settings.ezMode ? "Disable EZ Mode to edit" : undefined}
+                  />
+                </div>
               </div>
             )}
 
@@ -1519,8 +1622,11 @@ export default function RunPodLauncher() {
                 const isLrKey = key === "unetLr" || key === "textEncoderLr";
                 const isAlphaKey = key === "networkAlpha";
                 const disabledByAdaptive = (isLrKey || isAlphaKey) && (config.optimizer === "Prodigy" || config.optimizer === "DAdaptAdam");
+                const isDisabled = disabledByAdaptive || settings.ezMode;
                 const suggestedSteps = approved.length > 0
-                  ? Math.max(500, Math.min(4000, Math.round(approved.length * 100 / 100) * 100))
+                  ? config.sdxl
+                    ? Math.max(1500, Math.min(3000, Math.round(approved.length * 60 / 100) * 100))
+                    : Math.max(1000, Math.min(2000, Math.round(approved.length * 40 / 100) * 100))
                   : null;
                 return (
                   <div key={key}>
@@ -1528,7 +1634,7 @@ export default function RunPodLauncher() {
                     <input
                       type={type}
                       step={key === "noiseOffset" ? "0.001" : undefined}
-                      style={{ width: "100%", opacity: disabledByAdaptive ? 0.4 : 1 }}
+                      style={{ width: "100%", opacity: isDisabled ? 0.4 : 1 }}
                       value={config[key]}
                       onChange={(e) => {
                         const val = type === "number"
@@ -1536,13 +1642,14 @@ export default function RunPodLauncher() {
                           : e.target.value;
                         setConfig({ [key]: val });
                       }}
-                      disabled={disabledByAdaptive}
+                      disabled={isDisabled}
+                      title={settings.ezMode ? "Disable EZ Mode to edit" : disabledByAdaptive ? "Managed by adaptive optimizer" : undefined}
                     />
-                    {key === "steps" && suggestedSteps && config.steps !== suggestedSteps && (
+                    {key === "steps" && suggestedSteps && config.steps !== suggestedSteps && !settings.ezMode && (
                       <div
                         onClick={() => setConfig({ steps: suggestedSteps })}
                         style={{ marginTop: "3px", fontFamily: "var(--font-mono)", fontSize: "9px", color: "var(--accent-dim)", cursor: "pointer", letterSpacing: "0.04em" }}
-                        title={`${approved.length} images × 100 steps`}
+                        title={`${approved.length} images × ${config.sdxl ? 60 : 40} steps`}
                       >
                         → suggest {suggestedSteps}
                       </div>
@@ -1780,7 +1887,6 @@ export default function RunPodLauncher() {
               className="btn-primary"
               onClick={launchPod}
               disabled={!zipPath || !!pod || phase === "packaging"}
-              style={{ opacity: !zipPath || !!pod ? 0.4 : 1 }}
             >
               <Play size={12} style={{ display: "inline", marginRight: "5px" }} />
               2. Launch Training Pod
@@ -1868,10 +1974,11 @@ export default function RunPodLauncher() {
                   )}
                   <button
                     onClick={terminateCurrentPod}
-                    style={{ padding: "5px 12px", fontSize: "11px", display: "flex", alignItems: "center", gap: "5px", background: "var(--red-dim)", border: "1px solid var(--red)", color: "#d47070", borderRadius: "4px", cursor: "pointer", fontFamily: "var(--font-display)", fontWeight: 600, letterSpacing: "0.04em" }}
+                    disabled={terminating}
+                    style={{ padding: "5px 12px", fontSize: "11px", display: "flex", alignItems: "center", gap: "5px", background: "var(--red-dim)", border: "1px solid var(--red)", color: "#d47070", borderRadius: "4px", cursor: terminating ? "default" : "pointer", opacity: terminating ? 0.5 : 1, fontFamily: "var(--font-display)", fontWeight: 600, letterSpacing: "0.04em" }}
                   >
                     <Square size={11} />
-                    Terminate
+                    {terminating ? "Terminating…" : "Terminate"}
                   </button>
                 </div>
               </div>
@@ -1926,6 +2033,34 @@ export default function RunPodLauncher() {
                 {uploadStatus}
               </div>
             )}
+            {settings.ezMode ? (
+              <div style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", padding: "32px 40px", gap: "16px" }}>
+                {(() => {
+                  const m = uploadStatus?.match(/step (\d+)\/(\d+)/);
+                  if (m) {
+                    const cur = parseInt(m[1]), total = parseInt(m[2]);
+                    const pct = Math.round(cur / total * 100);
+                    return (
+                      <>
+                        <div style={{ fontFamily: "var(--font-mono)", fontSize: "32px", fontWeight: 700, color: "var(--accent-bright)", letterSpacing: "-0.02em" }}>
+                          {cur} <span style={{ fontSize: "18px", color: "var(--text-muted)", fontWeight: 400 }}>/ {total}</span>
+                        </div>
+                        <div style={{ width: "100%", maxWidth: "360px", height: "6px", background: "var(--bg-3)", borderRadius: "3px", overflow: "hidden" }}>
+                          <div style={{ width: `${pct}%`, height: "100%", background: "var(--accent)", transition: "width 3s ease", borderRadius: "3px" }} />
+                        </div>
+                        <div style={{ fontFamily: "var(--font-mono)", fontSize: "13px", color: "var(--text-secondary)" }}>{pct}%</div>
+                      </>
+                    );
+                  }
+                  const lastLine = [...logs].reverse().find(l => l.trim());
+                  return (
+                    <div style={{ fontFamily: "var(--font-mono)", fontSize: "12px", color: "var(--text-muted)", textAlign: "center" }}>
+                      {lastLine ?? (uploadStatus ?? "Ready. Package your dataset to begin.")}
+                    </div>
+                  );
+                })()}
+              </div>
+            ) : (
             <div ref={logScrollRef} style={{ flex: 1, overflow: "auto", padding: "0 20px 16px" }}>
               {logs.length === 0 && !uploadStatus && (
                 <div style={{ color: "var(--text-muted)" }}>
@@ -1952,6 +2087,7 @@ export default function RunPodLauncher() {
                   </span>
                   <button
                     className="btn-ghost"
+                    disabled={!!uploadStatus}
                     style={{ padding: "3px 10px", fontSize: "10px", color: "var(--accent-bright)", borderColor: "var(--accent-dim)" }}
                     onClick={() => downloadOutputs(jupyterUrl)}
                   >
@@ -1973,6 +2109,7 @@ export default function RunPodLauncher() {
                   </span>
                   <button
                     className="btn-ghost"
+                    disabled={!!uploadStatus}
                     style={{ padding: "3px 10px", fontSize: "10px", color: "var(--accent-bright)", borderColor: "var(--accent-dim)" }}
                     onClick={() => downloadOutputs(jupyterUrl)}
                   >
@@ -2002,6 +2139,7 @@ export default function RunPodLauncher() {
                 </div>
               )}
             </div>
+            )}
           </div>
 
         </div>

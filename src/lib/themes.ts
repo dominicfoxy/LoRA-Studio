@@ -93,27 +93,38 @@ export const BUILT_IN_THEMES: BuiltInTheme[] = [
   {
     id: "empathy",
     label: "Colorblind Hell (Simulated)",
-    // Olive-mud collapsed backgrounds, then everything else near-invisible.
+    // A deuteranopia simulation of the Colorblind Hell theme — fully opaque, fully readable.
+    // The colours themselves carry the confusion. The vivid red/green panels from Hell both
+    // collapse to the same indistinguishable olive-dark. The accent, approve-green, and
+    // reject-red all resolve to near-identical olive-gold — 2–4 units apart in hex.
+    // You can read everything. You can't use any of the colour signals.
+    // Blue is the only hue deuteranopia preserves — which is why that escape button glows.
     vars: {
-      "--bg-0":          "#0a0a08",
-      "--bg-1":          "#0c0b08",
-      "--bg-2":          "#131209",
-      "--bg-3":          "#191709",
-      "--bg-4":          "#201e0c",
-      "--border":        "rgba(42, 39, 10, 0.06)",
-      "--border-light":  "rgba(56, 53, 15, 0.06)",
-      "--text-primary":  "rgba(232, 230, 216, 0.04)",
-      "--text-secondary":"rgba(138, 136, 96, 0.04)",
-      "--text-muted":    "rgba(78, 76, 48, 0.04)",
-      "--accent":        "rgba(106, 104, 64, 0.04)",
-      "--accent-bright": "rgba(124, 122, 74, 0.04)",
-      "--accent-dim":    "rgba(58, 56, 32, 0.04)",
-      "--accent-glow":   "rgba(106, 104, 64, 0.02)",
-      "--green":         "rgba(122, 120, 48, 0.04)",
-      "--green-dim":     "rgba(122, 120, 48, 0.02)",
-      "--red":           "rgba(138, 120, 40, 0.04)",
-      "--red-dim":       "rgba(138, 120, 40, 0.02)",
-      "--blue":          "rgba(158, 148, 32, 0.04)",
+      // Red and green panels from Hell, collapsed to identical olive-dark
+      "--bg-0":          "#0b0b04",
+      "--bg-1":          "#0c0c04",
+      "--bg-2":          "#121104",
+      "--bg-3":          "#131204",
+      "--bg-4":          "#1a1806",
+      "--border":        "#272300",
+      "--border-light":  "#282400",
+      // Text: cream, fully opaque, readable — the hell is not about visibility
+      "--text-primary":  "#e0ddb8",
+      "--text-secondary":"#989060",
+      "--text-muted":    "#585030",
+      // Red-orange accent as seen through deuteranopia → golden-olive
+      "--accent":        "#c28800",
+      "--accent-bright": "#dea000",
+      "--accent-dim":    "#7c5800",
+      "--accent-glow":   "rgba(194, 136, 0, 0.18)",
+      // Pure green → olive-yellow. Pure red → golden-olive.
+      // #9ea200 vs #9c9e00. Good luck telling those apart.
+      "--green":         "#9ea200",
+      "--green-dim":     "rgba(158, 162, 0, 0.15)",
+      "--red":           "#9c9e00",
+      "--red-dim":       "rgba(156, 158, 0, 0.15)",
+      // Blue: preserved through deuteranopia — the one colour that still means something
+      "--blue":          "#4428c8",
     },
   },
   {
@@ -145,28 +156,32 @@ export const BUILT_IN_THEMES: BuiltInTheme[] = [
   {
     id: "colorblind-hell",
     label: "Colorblind Hell",
+    // A garish red/green nightmare. Text is fully readable — the suffering comes from
+    // the colour chaos. Backgrounds alternate vivid red/green tints. The accent is pure
+    // saturated red, so every active/selected state looks like an error or rejection.
+    // Sighted users: eye strain and existential dread. Colourblind users: complete chaos.
     vars: {
-      // Backgrounds: red/green alternating at identical luminance — the thematic core.
-      "--bg-0":          "#080d08",
-      "--bg-1":          "#0d0808",
-      "--bg-2":          "#121b0e",
-      "--bg-3":          "#1b120e",
-      "--bg-4":          "#212c18",
-      // Everything else: near-zero opacity. The app structure exists. Nothing is readable.
-      "--border":        "rgba(46, 28, 28, 0.06)",
-      "--border-light":  "rgba(62, 44, 42, 0.06)",
-      "--text-primary":  "rgba(238, 238, 230, 0.04)",
-      "--text-secondary":"rgba(138, 170, 134, 0.04)",
-      "--text-muted":    "rgba(80, 112, 72, 0.04)",
-      "--accent":        "rgba(22, 163, 74, 0.04)",
-      "--accent-bright": "rgba(34, 197, 94, 0.04)",
-      "--accent-dim":    "rgba(20, 83, 45, 0.04)",
-      "--accent-glow":   "rgba(22, 163, 74, 0.02)",
-      "--green":         "rgba(34, 197, 94, 0.04)",
-      "--green-dim":     "rgba(34, 197, 94, 0.02)",
-      "--red":           "rgba(220, 38, 38, 0.04)",
-      "--red-dim":       "rgba(220, 38, 38, 0.02)",
-      "--blue":          "rgba(200, 160, 32, 0.04)",
+      // Backgrounds: vivid alternating red/green tints — clashing panels
+      "--bg-0":          "#0e0606",
+      "--bg-1":          "#060e06",
+      "--bg-2":          "#1c0a0a",
+      "--bg-3":          "#0a1c0a",
+      "--bg-4":          "#260e0e",
+      "--border":        "#4a0000",
+      "--border-light":  "#004a00",
+      // Accent: max-saturated red — nav highlights, active states, EZ glow all look like errors
+      "--accent":        "#ff1100",
+      "--accent-bright": "#ff3300",
+      "--accent-dim":    "#cc0000",
+      "--accent-glow":   "rgba(255, 17, 0, 0.30)",
+      // Max-saturated green and red. Sighted: obviously different, deeply unpleasant together.
+      // Colourblind: identical. Either way, unpleasant.
+      "--green":         "#00ff44",
+      "--green-dim":     "rgba(0, 255, 68, 0.20)",
+      "--red":           "#ff0000",
+      "--red-dim":       "rgba(255, 0, 0, 0.20)",
+      // Purple, because why not
+      "--blue":          "#cc00ff",
     },
   },
   {

@@ -243,8 +243,11 @@ export default function SettingsPage() {
                 style={{ marginTop: "4px", width: "100%" }}
                 value={settings.dockerImage}
                 onChange={(e) => setSettings({ dockerImage: e.target.value })}
-                placeholder="ashleykza/kohya:latest"
+                placeholder="ashleykza/kohya:25.2.1"
               />
+              <div style={{ fontFamily: "var(--font-body)", fontStyle: "italic", fontSize: "11px", color: "var(--text-muted)", marginTop: "4px" }}>
+                Pinned to a specific tag — change only when you want to deliberately upgrade
+              </div>
             </div>
           </section>
 
@@ -274,6 +277,30 @@ export default function SettingsPage() {
                   Browse
                 </button>
               </div>
+            </div>
+          </section>
+
+          {/* About */}
+          <section style={{ marginTop: "32px" }}>
+            <div style={{
+              fontFamily: "var(--font-display)",
+              fontSize: "14px",
+              fontWeight: 700,
+              color: "var(--text-primary)",
+              marginBottom: "16px",
+              paddingBottom: "8px",
+              borderBottom: "1px solid var(--border)",
+            }}>About</div>
+            <div style={{ fontFamily: "var(--font-body)", fontSize: "12px", color: "var(--text-secondary)", lineHeight: 1.7 }}>
+              <p style={{ margin: "0 0 10px" }}>
+                <strong style={{ color: "var(--text-primary)" }}>Casting Couch</strong> is an independent open-source tool for creating character LoRA training datasets. It is not affiliated with, endorsed by, or associated with RunPod, Stability AI, AUTOMATIC1111 / Forge WebUI, Kohya SS, or Anthropic.
+              </p>
+              <p style={{ margin: "0 0 10px" }}>
+                This software is provided as-is, without warranty of any kind. You are solely responsible for the content you generate, the models you train, and how those models are used. Ensure your use complies with the terms of service of any third-party services (RunPod, image generation APIs, model licences, etc.) and applicable law.
+              </p>
+              <p style={{ margin: 0, color: "var(--text-muted)", fontSize: "11px" }}>
+                Licensed under the PolyForm Noncommercial License 1.0.0 — non-commercial use only.
+              </p>
             </div>
           </section>
 

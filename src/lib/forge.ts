@@ -88,7 +88,12 @@ export function normSeg(s: string | undefined | null): string {
 }
 
 export function base64ToBytes(b64: string): Uint8Array {
-  const binary = atob(b64);
+  let binary: string;
+  try {
+    binary = atob(b64);
+  } catch {
+    throw new Error("Forge returned an invalid image (base64 decode failed — malformed API response)");
+  }
   const bytes = new Uint8Array(binary.length);
   for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
   return bytes;

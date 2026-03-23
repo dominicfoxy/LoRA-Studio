@@ -296,7 +296,7 @@ export default function CharacterSetup() {
         subtitle="Define the character identity and dataset configuration"
         actions={
           <div style={{ display: "flex", gap: "8px" }}>
-            <button className="btn-ghost" onClick={() => setConfirmNew(true)}>
+            <button className="btn-ghost" disabled={confirmNew} onClick={() => setConfirmNew(true)}>
               <FilePlus size={12} style={{ display: "inline", marginRight: "6px" }} />New Character
             </button>
             <button className="btn-ghost" onClick={loadFromArchive}>

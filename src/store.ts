@@ -84,6 +84,8 @@ export interface TrainingConfig {
   sdxl: boolean;
   vPrediction: boolean;
   optimizer: "AdamW8bit" | "Prodigy" | "DAdaptAdam";
+  prodigyDCoef: number;
+  weightDecay: number;
 }
 
 export interface AppSettings {
@@ -97,6 +99,7 @@ export interface AppSettings {
   dockerImage: string;
   activeTheme: string;   // built-in theme id, e.g. "default"
   themeFile: string;     // absolute path to a custom theme JSON (empty = none)
+  ezMode: boolean;       // guided/beginner mode — locks technical fields, auto-applies sensible defaults
 }
 
 export interface ProjectState {
@@ -163,6 +166,8 @@ const defaultTraining: TrainingConfig = {
   sdxl: true,
   vPrediction: false,
   optimizer: "AdamW8bit",
+  prodigyDCoef: 2,
+  weightDecay: 0.01,
 };
 
 const defaultSettings: AppSettings = {
@@ -173,9 +178,10 @@ const defaultSettings: AppSettings = {
   recentProjects: [],
   uiScale: 1.0,
   volumeContents: {},
-  dockerImage: "ashleykza/kohya:latest",
+  dockerImage: "ashleykza/kohya:25.2.1",
   activeTheme: "default",
   themeFile: "",
+  ezMode: false,
 };
 
 const defaultGeneration: GenerationConfig = {
@@ -246,7 +252,7 @@ export const useStore = create<ProjectState>()(
     }),
     {
       name: "lora-studio-state",
-      version: 18,
+      version: 21,
       migrate: (persistedState: unknown, version: number) => {
         const state = persistedState as any;
         // v0: flat string fields on shot items
@@ -371,6 +377,21 @@ export const useStore = create<ProjectState>()(
         if (version === 15) {
           if (state.training?.networkDim === 64) state.training = { ...state.training, networkDim: 32 };
         }
+        // v19→20: add ezMode
+        if (version === 19) {
+          state.settings = { ...defaultSettings, ...state.settings, ezMode: false };
+        }
+        // v20→21: pin docker image — replace any kohya :latest variant with 25.2.1
+        if (version === 20) {
+          const img = state.settings?.dockerImage ?? "";
+          if (img === "ashleykza/kohya:latest" || img === "ashleykza/kohya-ss:latest") {
+            state.settings = { ...state.settings, dockerImage: "ashleykza/kohya:25.2.1" };
+          }
+        }
+        // v18→19: add prodigyDCoef and weightDecay
+        if (version === 18) {
+          state.training = { ...defaultTraining, ...state.training, prodigyDCoef: 2, weightDecay: 0.01 };
+        }
         // v17→18: add vPrediction flag
         if (version === 17) {
           state.training = { ...defaultTraining, ...state.training, vPrediction: false };
@@ -420,8 +441,17 @@ export const useStore = create<ProjectState>()(
         if (state.training?.minSnrGamma === undefined) {
           state.training = { ...defaultTraining, ...state.training, minSnrGamma: defaultTraining.minSnrGamma };
         }
+        if (state.settings?.ezMode === undefined) {
+          state.settings = { ...defaultSettings, ...state.settings, ezMode: false };
+        }
         if (state.training?.vPrediction === undefined) {
           state.training = { ...defaultTraining, ...state.training, vPrediction: false };
+        }
+        if (state.training?.prodigyDCoef === undefined) {
+          state.training = { ...defaultTraining, ...state.training, prodigyDCoef: 2 };
+        }
+        if (state.training?.weightDecay === undefined) {
+          state.training = { ...defaultTraining, ...state.training, weightDecay: 0.01 };
         }
         return state;
       },
