@@ -1,7 +1,7 @@
 [package]
 name = "lora-studio"
 version = "1.0.0"
-description = "LoRA Studio - Character LoRA training workflow"
+description = "Casting Couch - Character LoRA training workflow"
 authors = ["Jonathan Vanderpol"]
 edition = "2021"
 

@@ -1,5 +1,12 @@
 # LoRA Studio — Changelog
 
+## [v1.0.5a-alpha]
+
+- **Link pod now runs `checkAndResume` instead of re-uploading** — the "Link" button on detected running pods was routing through `startJupyterWait` → `uploadToVolume`, ignoring `.extract_done` / `.model_manifest` and always re-uploading the dataset and config. It now calls `checkAndResume` once Jupyter is ready, matching the reconnect path.
+- **Stale status ticker on upload/download error fixed** — if a zip upload, model upload, or LoRA download failed mid-transfer, the elapsed-time ticker kept running and overwrote the cleared status line with a stale "Uploading… (Xs)" every second. All three ticker usages are now wrapped in try/finally so the interval is always cleared on error. `downloadOutputs` error path also now clears `uploadStatus`.
+
+---
+
 ## [v1.0.5-alpha]
 
 - **Dynamic prompts export no longer includes character trigger word** — the trigger word is only meaningful when the character LoRA is loaded; the export is used before the LoRA exists. Outfit-level trigger words (for pre-existing outfit LoRAs) are unaffected.

@@ -464,7 +464,7 @@ export default function RunPodLauncher() {
   }, []);
 
   // Start polling Jupyter readiness — clears any existing wait first (prevents duplicates across remounts)
-  const startJupyterWait = (url: string) => {
+  const startJupyterWait = (url: string, opts: { checkFirst?: boolean } = {}) => {
     if (_jupyterWaitId) { clearInterval(_jupyterWaitId); _jupyterWaitId = null; }
     // Set the ref immediately so the pod poll tick's !jupyterUrlRef.current guard
     // prevents a duplicate call before the first jupyter_is_ready check fires
@@ -478,8 +478,13 @@ export default function RunPodLauncher() {
       if (ready) {
         if (_jupyterWaitId) { clearInterval(_jupyterWaitId); _jupyterWaitId = null; }
         stopJupyterTicker();
-        log(`Jupyter ready — starting upload…`);
-        uploadToVolume(url);
+        if (opts.checkFirst) {
+          log(`Jupyter ready — checking pod state…`);
+          checkAndResume(url);
+        } else {
+          log(`Jupyter ready — starting upload…`);
+          uploadToVolume(url);
+        }
       } else if (attempts >= 48) {
         if (_jupyterWaitId) { clearInterval(_jupyterWaitId); _jupyterWaitId = null; }
         stopJupyterTicker();
@@ -676,8 +681,11 @@ export default function RunPodLauncher() {
         if (!opts.skipZipUpload) {
           log(`Uploading ${zipName} to volume…`);
           const stopZipTicker = startTicker(`Uploading dataset zip…`);
-          await jupyterUploadFile(jUrl, JUPYTER_PASS, `workspace/${zipName}`, actualZipPath!);
-          stopZipTicker();
+          try {
+            await jupyterUploadFile(jUrl, JUPYTER_PASS, `workspace/${zipName}`, actualZipPath!);
+          } finally {
+            stopZipTicker();
+          }
           log(`Dataset uploaded.`);
         }
         setUploadStatus(`Extracting dataset on pod…`);
@@ -735,8 +743,11 @@ export default function RunPodLauncher() {
         }
         log(`Uploading checkpoint from local path (this may take a while)…`);
         const stopModelUploadTicker = startTicker(`Uploading ${modelBaseName}…`);
-        await jupyterUploadFile(jUrl, JUPYTER_PASS, `workspace/models/${modelBaseName}`, config.baseModelLocalPath);
-        stopModelUploadTicker();
+        try {
+          await jupyterUploadFile(jUrl, JUPYTER_PASS, `workspace/models/${modelBaseName}`, config.baseModelLocalPath);
+        } finally {
+          stopModelUploadTicker();
+        }
         await jupyterRunCommand(jUrl, JUPYTER_PASS, `echo "${modelBaseName}" > /workspace/.model_manifest`);
         log(`Model uploaded.`);
       } else {
@@ -788,13 +799,16 @@ export default function RunPodLauncher() {
         const fileLabel = toDownload.length > 1 ? `${filename} (${i + 1}/${toDownload.length})` : filename;
         log(`Downloading ${fileLabel}…`);
         const stopDownloadTicker = startTicker(`Downloading ${fileLabel}…`);
-        await invoke("jupyter_download_file", {
-          jupyterUrl: jUrl,
-          password: JUPYTER_PASS,
-          remotePath: remotePath.replace(/^\//, ""),
-          localPath,
-        });
-        stopDownloadTicker();
+        try {
+          await invoke("jupyter_download_file", {
+            jupyterUrl: jUrl,
+            password: JUPYTER_PASS,
+            remotePath: remotePath.replace(/^\//, ""),
+            localPath,
+          });
+        } finally {
+          stopDownloadTicker();
+        }
         log(`Saved → ${localPath}`);
       }
       setUploadStatus(null);
@@ -814,6 +828,7 @@ export default function RunPodLauncher() {
         }
       }
     } catch (err) {
+      setUploadStatus(null);
       log(`Download error: ${err}`);
       log(`Pod is still running — use Retry Download to try again, or open Jupyter to retrieve the file manually.`);
       setDownloadFailed(true);
@@ -1003,7 +1018,10 @@ export default function RunPodLauncher() {
     setPhase("training");
     setPipelineStep(0);
     log(`Linked to existing pod: ${p.id}`);
+    const url = `https://${p.id}-8888.proxy.runpod.net`;
+    setJupyterUrl(url);
     startPolling(p.id);
+    startJupyterWait(url, { checkFirst: true });
   };
 
   const fetchPrices = async () => {

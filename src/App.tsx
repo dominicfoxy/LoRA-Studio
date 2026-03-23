@@ -123,7 +123,7 @@ export default function App() {
             color: "var(--accent-bright)",
             letterSpacing: "-0.02em",
           }}>
-            LoRA<span style={{ color: "var(--text-muted)" }}>·</span>Studio
+            Casting<br />Couch
           </div>
           <div style={{
             fontFamily: "var(--font-mono)",
@@ -132,7 +132,7 @@ export default function App() {
             marginTop: "2px",
             letterSpacing: "0.08em",
           }}>
-            CHARACTER TRAINER
+            CHARACTER CASTING
           </div>
         </div>
 

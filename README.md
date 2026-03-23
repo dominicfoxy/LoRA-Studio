@@ -1,4 +1,4 @@
-# LoRA Studio
+# Casting Couch
 
 A Tauri desktop app for end-to-end character LoRA creation — from shot list to RunPod training.
 
