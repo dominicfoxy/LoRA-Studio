@@ -96,7 +96,7 @@ npm run tauri build  # production build
 - Optionally select a **Network Volume** to cache the base model across runs
 - Set base model via search (CivitAI → HuggingFace) or local path
 - Toggle **SDXL** or **SD 1.5** to match your checkpoint architecture
-- Set training hyperparameters (steps, LR, network dim, resolution)
+- Set training hyperparameters (steps, UNet LR, Text Encoder LR, network dim, network alpha, noise offset, min SNR gamma, resolution)
 - Choose **Final LoRA only** or **Final + intermediates** for auto-download
 - **Package & Launch** → the app handles everything automatically:
   - Zips dataset, spins up Kohya pod, uploads dataset + config
@@ -111,12 +111,16 @@ npm run tauri build  # production build
 |---|---|---|
 | Network dim | 32 | Higher absorbs style/colour from training data; 32 is the sweet spot for character LoRAs |
 | Network alpha | 16 | Half of dim is standard |
-| Learning rate | 1e-4 | Lower = more conservative |
+| UNet LR | 5e-5 | Main diffusion network learning rate |
+| Text Encoder LR | 1e-5 | Lower than UNet to preserve text understanding |
 | Steps | 1500–2500 | ~15 steps/image is a good ratio |
+| Noise offset | 0.0357 | Mild contrast/saturation boost for SD1.x; ignored for SDXL |
+| Min SNR Gamma | 5 | Stabilises loss weighting across noise levels; set to 0 to disable |
 | Resolution | 1024 | Illustrious native resolution |
 | Batch size | auto | Tuned to GPU VRAM (1–4) |
 | Optimizer | AdamW8bit | Memory efficient |
 | Mixed precision | bf16 | Better dynamic range than fp16; avoids overflow on Ampere+ GPUs |
+| V-Prediction | off | Enable for NoobAI-XL and other v-pred models. Standard SDXL uses epsilon — leave off. Adds `--v_parameterization --zero_terminal_snr` |
 
 ## Dataset Recommendations
 

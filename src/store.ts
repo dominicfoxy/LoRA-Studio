@@ -70,14 +70,19 @@ export interface TrainingConfig {
   gpuTypeId: string;
   cloudType: "SECURE" | "COMMUNITY" | "ALL";
   steps: number;
-  learningRate: string;
+  unetLr: string;
+  textEncoderLr: string;
   networkDim: number;
+  networkAlpha: number;
+  noiseOffset: number;
+  minSnrGamma: number;
   resolution: number;
   networkVolumeId: string;
   baseModelLocalPath: string;
   baseModelDownloadUrl: string;
   containerDiskInGb: number;
   sdxl: boolean;
+  vPrediction: boolean;
   optimizer: "AdamW8bit" | "Prodigy" | "DAdaptAdam";
 }
 
@@ -144,14 +149,19 @@ const defaultTraining: TrainingConfig = {
   gpuTypeId: "NVIDIA A100-SXM4-40GB",
   cloudType: "SECURE",
   steps: 1500,
-  learningRate: "1e-4",
+  unetLr: "5e-5",
+  textEncoderLr: "1e-5",
   networkDim: 32,
+  networkAlpha: 16,
+  noiseOffset: 0.0357,
+  minSnrGamma: 5,
   resolution: 1024,
   networkVolumeId: "",
   baseModelLocalPath: "",
   baseModelDownloadUrl: "",
   containerDiskInGb: 40,
   sdxl: true,
+  vPrediction: false,
   optimizer: "AdamW8bit",
 };
 
@@ -182,7 +192,7 @@ const defaultGeneration: GenerationConfig = {
   height: 1024,
   steps: 28,
   cfgScale: 7,
-  samplerName: "DPM++ 2M Karras",
+  samplerName: "DPM++ 2M",
   scheduler: "Karras",
   genMode: "all",
   randomCount: 10,
@@ -236,7 +246,7 @@ export const useStore = create<ProjectState>()(
     }),
     {
       name: "lora-studio-state",
-      version: 16,
+      version: 18,
       migrate: (persistedState: unknown, version: number) => {
         const state = persistedState as any;
         // v0: flat string fields on shot items
@@ -289,7 +299,7 @@ export const useStore = create<ProjectState>()(
             ...state.generation,
             steps: state.generation?.steps ?? 28,
             cfgScale: state.generation?.cfgScale ?? 7,
-            samplerName: state.generation?.samplerName ?? "DPM++ 2M Karras",
+            samplerName: state.generation?.samplerName ?? "DPM++ 2M",
             scheduler: state.generation?.scheduler ?? "Karras",
           };
         }
@@ -361,6 +371,24 @@ export const useStore = create<ProjectState>()(
         if (version === 15) {
           if (state.training?.networkDim === 64) state.training = { ...state.training, networkDim: 32 };
         }
+        // v17→18: add vPrediction flag
+        if (version === 17) {
+          state.training = { ...defaultTraining, ...state.training, vPrediction: false };
+        }
+        // v16→17: split learningRate into unetLr/textEncoderLr; add networkAlpha, noiseOffset, minSnrGamma
+        if (version === 16) {
+          const oldLr = (state.training as any)?.learningRate;
+          state.training = {
+            ...defaultTraining,
+            ...state.training,
+            unetLr: oldLr ?? defaultTraining.unetLr,
+            textEncoderLr: defaultTraining.textEncoderLr,
+            networkAlpha: defaultTraining.networkAlpha,
+            noiseOffset: defaultTraining.noiseOffset,
+            minSnrGamma: defaultTraining.minSnrGamma,
+          };
+          delete (state.training as any).learningRate;
+        }
         // ensure theme fields always present regardless of migration path
         if (!state.settings?.activeTheme) {
           state.settings = { ...defaultSettings, ...state.settings, activeTheme: "default", themeFile: "" };
@@ -376,6 +404,24 @@ export const useStore = create<ProjectState>()(
         // ensure optimizer always present regardless of migration path
         if (!state.training?.optimizer) {
           state.training = { ...defaultTraining, ...state.training, optimizer: "AdamW8bit" };
+        }
+        // ensure split LR fields always present (supersede legacy learningRate)
+        if (!state.training?.unetLr) {
+          const oldLr = (state.training as any)?.learningRate;
+          state.training = { ...defaultTraining, ...state.training, unetLr: oldLr ?? defaultTraining.unetLr, textEncoderLr: defaultTraining.textEncoderLr };
+          delete (state.training as any).learningRate;
+        }
+        if (state.training?.networkAlpha === undefined) {
+          state.training = { ...defaultTraining, ...state.training, networkAlpha: defaultTraining.networkAlpha };
+        }
+        if (state.training?.noiseOffset === undefined) {
+          state.training = { ...defaultTraining, ...state.training, noiseOffset: defaultTraining.noiseOffset };
+        }
+        if (state.training?.minSnrGamma === undefined) {
+          state.training = { ...defaultTraining, ...state.training, minSnrGamma: defaultTraining.minSnrGamma };
+        }
+        if (state.training?.vPrediction === undefined) {
+          state.training = { ...defaultTraining, ...state.training, vPrediction: false };
         }
         return state;
       },

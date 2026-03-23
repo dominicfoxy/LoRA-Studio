@@ -107,7 +107,6 @@ export function buildDynamicPromptsBlock(
   }
 ): string {
   const prefixParts = [
-    character.triggerWord,
     character.species,
     character.baseDescription,
     character.artistTags ? `style of ${character.artistTags}` : "",

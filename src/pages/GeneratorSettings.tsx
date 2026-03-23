@@ -3,11 +3,11 @@ import { useStore } from "../store";
 
 const SAMPLERS = [
   "Euler", "Euler a", "Euler CFG++",
-  "DPM++ 2M", "DPM++ 2M Karras", "DPM++ 2M SDE", "DPM++ 2M SDE Karras",
-  "DPM++ 3M SDE", "DPM++ 3M SDE Karras", "DPM++ 3M SDE Exponential",
-  "DPM++ SDE", "DPM++ SDE Karras",
+  "DPM++ 2M", "DPM++ 2M SDE",
+  "DPM++ 3M SDE",
+  "DPM++ SDE",
   "DDIM", "PLMS", "UniPC", "Heun",
-  "LMS", "LMS Karras",
+  "LMS",
 ];
 
 const SCHEDULERS = [
@@ -116,15 +116,15 @@ export default function GeneratorSettings() {
               label="Steps"
               value={generation.steps}
               onChange={(v) => updateGeneration({ steps: Math.round(v) })}
-              min={1} max={80} step={1}
-              hint="20–30 is typical. More steps = slower but can improve detail."
+              min={1} max={150} step={1}
+              hint="20–30 is typical for DPM++ samplers. Euler a / DDIM may need 50+."
             />
             <SliderField
               label="CFG Scale"
               value={generation.cfgScale}
               onChange={(v) => updateGeneration({ cfgScale: v })}
               min={1} max={20} step={0.5}
-              hint="How closely to follow the prompt. 5–9 is typical for Illustrious."
+              hint="How closely to follow the prompt. 5–9 for SDXL/Illustrious, 7 for SD1.5."
             />
           </div>
 

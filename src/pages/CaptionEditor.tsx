@@ -19,6 +19,8 @@ export default function CaptionEditor() {
   const [selected, setSelected] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
+  const [saveProgress, setSaveProgress] = useState<{ current: number; total: number } | null>(null);
+  const [saveStatus, setSaveStatus] = useState<string | null>(null);
   const [disabledTags, setDisabledTags] = useState<Set<string>>(new Set());
   const [tagsExpanded, setTagsExpanded] = useState(true);
   const [globalTagInput, setGlobalTagInput] = useState("");
@@ -88,26 +90,48 @@ export default function CaptionEditor() {
     const tag = globalTagInput.trim();
     if (!tag) return;
     setAddingGlobal(true);
+    let errors = 0;
     for (const img of filtered) {
       const tags = img.caption.split(",").map((t) => t.trim()).filter(Boolean);
       if (tags.includes(tag)) continue;
       const updated = normalizeCaption([...tags, tag].join(", "), character.triggerWord);
-      await invoke("save_caption", { imagePath: img.path, caption: updated });
-      updateImage(img.id, { caption: updated });
+      try {
+        await invoke("save_caption", { imagePath: img.path, caption: updated });
+        updateImage(img.id, { caption: updated });
+      } catch {
+        errors++;
+      }
     }
     setGlobalTagInput("");
     setAddingGlobal(false);
+    if (errors > 0) setSaveError(`${errors} caption${errors > 1 ? "s" : ""} failed to save.`);
   };
 
   const saveAllCaptions = async () => {
     setSaving(true);
-    for (const img of filtered) {
+    setSaveProgress({ current: 0, total: filtered.length });
+    setSaveStatus(null);
+    let errors = 0;
+    for (let i = 0; i < filtered.length; i++) {
+      const img = filtered[i];
+      setSaveProgress({ current: i + 1, total: filtered.length });
       const normalized = applyDisabled(img.caption);
-      await invoke("save_caption", { imagePath: img.path, caption: normalized });
-      updateImage(img.id, { caption: normalized });
+      try {
+        await invoke("save_caption", { imagePath: img.path, caption: normalized });
+        updateImage(img.id, { caption: normalized });
+      } catch {
+        errors++;
+      }
     }
     setDisabledTags(new Set());
     setSaving(false);
+    setSaveProgress(null);
+    if (errors > 0) {
+      setSaveError(`${errors} caption${errors > 1 ? "s" : ""} failed to save.`);
+    } else {
+      setSaveStatus(`Saved ${filtered.length} caption${filtered.length !== 1 ? "s" : ""}`);
+      setTimeout(() => setSaveStatus(null), 3000);
+    }
   };
 
   return (
@@ -230,6 +254,23 @@ export default function CaptionEditor() {
               })}
             </div>
           )}
+        </div>
+      )}
+
+      {saveProgress && (
+        <div style={{ display: "flex", alignItems: "center", gap: "10px", padding: "5px 28px", borderBottom: "1px solid var(--border)", flexShrink: 0, background: "var(--bg-1)" }}>
+          <div style={{ width: "8px", height: "8px", borderRadius: "50%", background: "var(--accent-bright)", animation: "pulse 1s infinite", flexShrink: 0 }} />
+          <div style={{ fontFamily: "var(--font-mono)", fontSize: "11px", color: "var(--accent-bright)", flex: 1 }}>
+            Saving captions… {saveProgress.current} / {saveProgress.total}
+          </div>
+          <div style={{ width: "160px", height: "3px", background: "var(--bg-3)", borderRadius: "2px", overflow: "hidden", flexShrink: 0 }}>
+            <div style={{ width: `${(saveProgress.current / saveProgress.total) * 100}%`, height: "100%", background: "var(--accent)", transition: "width 0.2s" }} />
+          </div>
+        </div>
+      )}
+      {saveStatus && (
+        <div style={{ display: "flex", alignItems: "center", gap: "8px", padding: "5px 28px", borderBottom: "1px solid var(--border)", flexShrink: 0, background: "var(--bg-1)" }}>
+          <span style={{ fontFamily: "var(--font-mono)", fontSize: "11px", color: "var(--green)" }}>✓ {saveStatus}</span>
         </div>
       )}
 

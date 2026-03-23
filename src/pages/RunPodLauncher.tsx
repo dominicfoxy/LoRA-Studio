@@ -30,6 +30,11 @@ function logColor(line: string): string {
   return "var(--text-muted)";
 }
 
+// Strip characters unsafe in bash double-quoted strings from a filename
+function sanitizeShellArg(s: string): string {
+  return s.replace(/["$`\\]/g, "");
+}
+
 // Module-level state — survives HMR remounts (React Fast Refresh doesn't re-run module scope)
 let _podPollId: ReturnType<typeof setInterval> | null = null;
 let _logPollId: ReturnType<typeof setInterval> | null = null;
@@ -76,6 +81,7 @@ export default function RunPodLauncher() {
   const [modelOpen, setModelOpen] = useState(false);
   const [modelSelected, setModelSelected] = useState("");
   const [logCopied, setLogCopied] = useState(false);
+  const [commandCopied, setCommandCopied] = useState(false);
   const [autoScroll, setAutoScroll] = useState(true);
   const logScrollRef = useRef<HTMLDivElement>(null);
   // GPU IDs available in the selected volume's specific datacenter (for cache-hit detection)
@@ -88,6 +94,16 @@ export default function RunPodLauncher() {
   const [autoTerminate, setAutoTerminate] = useState(true);
   const autoTerminateRef = useRef(true);
   useEffect(() => { autoTerminateRef.current = autoTerminate; }, [autoTerminate]);
+  // Clear all intervals on unmount to prevent accumulation across navigations
+  useEffect(() => {
+    return () => {
+      if (_podPollId) { clearInterval(_podPollId); _podPollId = null; }
+      if (_logPollId) { clearInterval(_logPollId); _logPollId = null; }
+      if (_jupyterWaitId) { clearInterval(_jupyterWaitId); _jupyterWaitId = null; }
+      _uploadInProgress = false;
+    };
+  }, []);
+
   // Non-stale refs for use inside polling intervals / async callbacks
   const characterRef = useRef(character);
   useEffect(() => { characterRef.current = character; }, [character]);
@@ -119,12 +135,6 @@ export default function RunPodLauncher() {
     }
   }, [character.baseModel]);
 
-  // Auto-populate local path fallback from character's base model path
-  useEffect(() => {
-    if (character.baseModel && !config.baseModelLocalPath) {
-      setConfig({ baseModelLocalPath: character.baseModel });
-    }
-  }, [character.baseModel]);
 
   const hasApiKey = !!settings.runpodApiKey;
 
@@ -138,8 +148,9 @@ export default function RunPodLauncher() {
   const checkAndResume = async (jUrl: string) => {
     const JUPYTER_PASS = "lorastudio";
     const zipName = `${character.triggerWord}_dataset.zip`;
-    const modelBaseName = (character.baseModel || "model.safetensors")
-      .replace(/\s*\[.*?\]\s*$/, "").trim().split(/[\\/]/).pop() || "model.safetensors";
+    const modelBaseName = sanitizeShellArg(
+      (character.baseModel || "model.safetensors").replace(/\s*\[.*?\]\s*$/, "").trim().split(/[\\/]/).pop() || "model.safetensors"
+    );
 
     log("Checking pod state before restart…");
     setUploadStatus("Checking pod state…");
@@ -223,30 +234,40 @@ export default function RunPodLauncher() {
         jupyterUrlRef.current = runpodActiveJupyterUrl;
         setJupyterUrlLocal(runpodActiveJupyterUrl);
         log(`Reconnected to pod ${runpodActivePodId} — checking training status…`);
-        // Check whether training has started by reading training.log
+        // Check sentinel file first — tiny file, always readable even if training.log is large
         invoke<string>("jupyter_read_file", {
           jupyterUrl: runpodActiveJupyterUrl,
           password: "lorastudio",
-          remotePath: "workspace/training.log",
-        }).then((content) => {
-          if (content.trim()) {
-            if (content.includes("training complete")) {
-              log(`Training already completed — starting download…`);
-              downloadOutputs(runpodActiveJupyterUrl);
-            } else if (content.includes("training failed")) {
-              log(`Training previously failed — see pod logs. Use Retry to relaunch or Terminate to stop billing.`);
-              setTrainingHalted(true);
-            } else {
-              log(`Training already running — resuming log tail…`);
-              startLogPolling(runpodActiveJupyterUrl, content.split("\n").length);
-            }
-          } else {
-            log(`Training log empty — restarting upload…`);
-            uploadToVolume(runpodActiveJupyterUrl);
-          }
+          remotePath: "workspace/.training_done",
+        }).then(() => {
+          log(`Training already completed — starting download…`);
+          downloadOutputs(runpodActiveJupyterUrl);
         }).catch(() => {
-          // training.log doesn't exist — check what's on the pod before deciding what to re-upload
-          checkAndResume(runpodActiveJupyterUrl);
+          // No sentinel — check training.log for status (may be large; falls back to checkAndResume on error)
+          invoke<string>("jupyter_read_file", {
+            jupyterUrl: runpodActiveJupyterUrl,
+            password: "lorastudio",
+            remotePath: "workspace/training.log",
+          }).then((content) => {
+            if (content.trim()) {
+              if (content.includes("training failed")) {
+                log(`Training previously failed — see pod logs. Use Retry to relaunch or Terminate to stop billing.`);
+                setTrainingHalted(true);
+              } else if (content.includes("training complete")) {
+                log(`Training already completed — starting download…`);
+                downloadOutputs(runpodActiveJupyterUrl);
+              } else {
+                log(`Training already running — resuming log tail…`);
+                startLogPolling(runpodActiveJupyterUrl, content.split("\n").length);
+              }
+            } else {
+              log(`Training log empty — restarting upload…`);
+              uploadToVolume(runpodActiveJupyterUrl);
+            }
+          }).catch(() => {
+            // training.log doesn't exist — check what's on the pod before deciding what to re-upload
+            checkAndResume(runpodActiveJupyterUrl);
+          });
         });
       }
     }).catch(() => {
@@ -445,6 +466,9 @@ export default function RunPodLauncher() {
   // Start polling Jupyter readiness — clears any existing wait first (prevents duplicates across remounts)
   const startJupyterWait = (url: string) => {
     if (_jupyterWaitId) { clearInterval(_jupyterWaitId); _jupyterWaitId = null; }
+    // Set the ref immediately so the pod poll tick's !jupyterUrlRef.current guard
+    // prevents a duplicate call before the first jupyter_is_ready check fires
+    jupyterUrlRef.current = url;
     let attempts = 0;
     log(`Waiting for Jupyter to come up…`);
     const stopJupyterTicker = startTicker("Waiting for Jupyter…");
@@ -464,6 +488,60 @@ export default function RunPodLauncher() {
     }, 15000);
   };
 
+  const buildTrainingCommand = () => {
+    const previewModelBaseName = sanitizeShellArg(
+      (config.baseModelLocalPath || config.baseModelDownloadUrl || "model.safetensors")
+        .replace(/\s*\[.*?\]\s*$/, "").trim().split(/[\\/]/).pop() || "model.safetensors"
+    );
+    const selectedVram = RECOMMENDED_GPUS.find(g => g.id === config.gpuTypeId)?.vram ?? 0;
+    const previewGpuFlags = gpuTrainingFlags(selectedVram, config.optimizer);
+    const isAdaptive = config.optimizer === "Prodigy" || config.optimizer === "DAdaptAdam";
+    const networkAlpha = isAdaptive ? 1 : config.networkAlpha;
+    const lrFlagStr = isAdaptive
+      ? "--learning_rate 1.0"
+      : `--unet_lr ${config.unetLr} --text_encoder_lr ${config.textEncoderLr}`;
+    const lrScheduler = isAdaptive ? "constant" : "cosine_with_restarts";
+    const lrWarmupSteps = isAdaptive ? 0 : Math.round(config.steps * 0.05);
+    const lrWarmupFlag = isAdaptive ? "" : `--lr_warmup_steps ${lrWarmupSteps}`;
+    const optimizerArgs = config.optimizer === "Prodigy"
+      ? `--optimizer_args "decouple=True" "weight_decay=0.01" "d_coef=2" "use_bias_correction=True"`
+      : config.optimizer === "DAdaptAdam"
+      ? `--optimizer_args "decouple=True" "weight_decay=0.01"`
+      : "";
+    const saveEveryNSteps = Math.max(100, Math.round(config.steps / 20));
+    const trainScript = config.sdxl ? "sdxl_train_network.py" : "train_network.py";
+    const noiseOffsetFlag = (config.sdxl || config.noiseOffset <= 0) ? "" : `--noise_offset ${config.noiseOffset}`;
+    const minSnrFlag = config.minSnrGamma > 0 ? `--min_snr_gamma ${config.minSnrGamma}` : "";
+    const vPredFlag = config.vPrediction ? "--v_parameterization --zero_terminal_snr" : "";
+    const noHalfVaeFlag = config.sdxl ? "--no_half_vae" : "";
+    return [
+      `accelerate launch --num_cpu_threads_per_process 1 ${trainScript}`,
+      `--dataset_config /workspace/kohya_config.toml`,
+      `--pretrained_model_name_or_path /workspace/models/${previewModelBaseName}`,
+      `--output_dir /workspace/output`,
+      `--output_name ${character.triggerWord || "<trigger>"}_lora`,
+      `--save_model_as safetensors`,
+      `--max_train_steps ${config.steps}`,
+      lrFlagStr,
+      `--lr_scheduler ${lrScheduler}`,
+      lrWarmupFlag,
+      `--optimizer_type ${config.optimizer}`,
+      optimizerArgs,
+      `--network_module networks.lora`,
+      `--network_dim ${config.networkDim}`,
+      `--network_alpha ${networkAlpha}`,
+      noiseOffsetFlag,
+      minSnrFlag,
+      vPredFlag,
+      noHalfVaeFlag,
+      `--mixed_precision bf16`,
+      `--save_precision fp16`,
+      previewGpuFlags.gradientCheckpointing ? "--gradient_checkpointing" : "",
+      previewGpuFlags.cacheLatents ? "--cache_latents" : "",
+      `--save_every_n_steps ${saveEveryNSteps}`,
+    ].filter(s => s.trim()).join(" \\\n  ");
+  };
+
   const launchTraining = async (jUrl: string, modelBaseName: string, gpuFlags: { batchSize: number; gradientCheckpointing: boolean; cacheLatents: boolean }) => {
     const JUPYTER_PASS = "lorastudio";
     // Guard: refuse to launch if training is already running on the pod
@@ -480,8 +558,10 @@ export default function RunPodLauncher() {
     setUploadStatus(`Launching training…`);
     log(`Launching training…`);
     const isAdaptive = config.optimizer === "Prodigy" || config.optimizer === "DAdaptAdam";
-    const networkAlpha = isAdaptive ? 1 : Math.floor(config.networkDim / 2);
-    const lr = isAdaptive ? "1.0" : config.learningRate;
+    const networkAlpha = isAdaptive ? 1 : config.networkAlpha;
+    const lrFlagStr = isAdaptive
+      ? "--learning_rate 1.0"
+      : `--unet_lr ${config.unetLr} --text_encoder_lr ${config.textEncoderLr}`;
     const lrScheduler = isAdaptive ? "constant" : "cosine_with_restarts";
     const lrWarmupSteps = isAdaptive ? 0 : Math.round(config.steps * 0.05);
     const lrWarmupFlag = isAdaptive ? "" : `--lr_warmup_steps ${lrWarmupSteps}`;
@@ -494,10 +574,13 @@ export default function RunPodLauncher() {
     const trainScript = config.sdxl ? "sdxl_train_network.py" : "train_network.py";
     const gradCkptFlag = gpuFlags.gradientCheckpointing ? "--gradient_checkpointing" : "";
     const cacheLatentsFlag = gpuFlags.cacheLatents ? "--cache_latents" : "";
-    // noise_offset 0.03 improves contrast/saturation in SD1.x; causes color drift on SDXL (different noise schedule)
-    const noiseOffsetFlag = config.sdxl ? "" : "--noise_offset 0.03";
+    // noise_offset improves contrast/saturation in SD1.x; causes color drift on SDXL (different noise schedule)
+    const noiseOffsetFlag = (config.sdxl || config.noiseOffset <= 0) ? "" : `--noise_offset ${config.noiseOffset}`;
+    const minSnrFlag = config.minSnrGamma > 0 ? `--min_snr_gamma ${config.minSnrGamma}` : "";
     // SDXL VAE has fp16 precision issues that cause systematic color errors baked into LoRA weights
     const noHalfVaeFlag = config.sdxl ? "--no_half_vae" : "";
+    // V-prediction mode (e.g. NoobAI-XL): requires both flags together; standard SDXL uses epsilon and must NOT set these
+    const vPredFlag = config.vPrediction ? "--v_parameterization --zero_terminal_snr" : "";
     const trainingArgs = [
       `accelerate launch --num_cpu_threads_per_process 1 ${trainScript}`,
       `--dataset_config /workspace/kohya_config.toml`,
@@ -506,7 +589,7 @@ export default function RunPodLauncher() {
       `--output_name ${character.triggerWord}_lora`,
       `--save_model_as safetensors`,
       `--max_train_steps ${config.steps}`,
-      `--learning_rate ${lr}`,
+      lrFlagStr,
       `--lr_scheduler ${lrScheduler}`,
       lrWarmupFlag,
       `--optimizer_type ${config.optimizer}`,
@@ -515,6 +598,8 @@ export default function RunPodLauncher() {
       `--network_dim ${config.networkDim}`,
       `--network_alpha ${networkAlpha}`,
       noiseOffsetFlag,
+      minSnrFlag,
+      vPredFlag,
       noHalfVaeFlag,
       `--mixed_precision bf16`,
       `--save_precision fp16`,
@@ -523,9 +608,9 @@ export default function RunPodLauncher() {
       `--save_every_n_steps ${saveEveryNSteps}`,
     ].filter(s => s.trim()).join(" \\\n  ");
     await invoke("save_project", { path: `${character.outputDir}/training_command.txt`, data: `# Training command (debug)\n# Script: ${trainScript}\n# Generated: ${new Date().toISOString()}\n\n${trainingArgs}\n` });
-    log(`[info] accelerate launch ${trainScript} --optimizer_type ${config.optimizer} --max_train_steps ${config.steps} --network_dim ${config.networkDim} --network_alpha ${networkAlpha}${noiseOffsetFlag ? " " + noiseOffsetFlag : " (no noise_offset — SDXL)"}`);
+    log(`[info] accelerate launch ${trainScript} --optimizer_type ${config.optimizer} --max_train_steps ${config.steps} --network_dim ${config.networkDim} --network_alpha ${networkAlpha} ${lrFlagStr}${noiseOffsetFlag ? " " + noiseOffsetFlag : " (no noise_offset — SDXL)"}${minSnrFlag ? " " + minSnrFlag : ""}`);
     await jupyterRunCommand(jUrl, JUPYTER_PASS,
-      `nohup bash -c '> /workspace/training.log; SCRIPT=\$(find /workspace -maxdepth 5 -name "${trainScript}" 2>/dev/null | head -1); if [ -z "\$SCRIPT" ]; then echo "ERROR: ${trainScript} not found" >> /workspace/training.log; exit 1; fi; PYTHON=""; for P in /venv/bin/python3 /venv/bin/python /opt/conda/bin/python3 /workspace/venv/bin/python3 /workspace/venv/bin/python /usr/local/bin/python3; do if [ -f "\$P" ] && "\$P" -c "import accelerate" 2>/dev/null; then PYTHON="\$P"; break; fi; done; if [ -z "\$PYTHON" ]; then echo "ERROR: no Python with accelerate found" >> /workspace/training.log; exit 1; fi; ACCEL=\$(dirname "\$PYTHON")/accelerate; mkdir -p /workspace/output; echo "launcher: \$ACCEL" >> /workspace/training.log; export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True; cd "\$(dirname "\$SCRIPT")" && "\$ACCEL" launch --num_cpu_threads_per_process 1 "\$SCRIPT" --dataset_config /workspace/kohya_config.toml --pretrained_model_name_or_path /workspace/models/${modelBaseName} --output_dir /workspace/output --output_name ${character.triggerWord}_lora --save_model_as safetensors --max_train_steps ${config.steps} --learning_rate ${lr} --lr_scheduler ${lrScheduler} ${lrWarmupFlag} --optimizer_type ${config.optimizer} ${optimizerArgs} --network_module networks.lora --network_dim ${config.networkDim} --network_alpha ${networkAlpha} ${noiseOffsetFlag} ${noHalfVaeFlag} --mixed_precision bf16 --save_precision fp16 ${gradCkptFlag} ${cacheLatentsFlag} --save_every_n_steps ${saveEveryNSteps} >> /workspace/training.log 2>&1; EXIT_CODE=\$?; echo "training complete" >> /workspace/training.log; if [ \$EXIT_CODE -ne 0 ]; then echo "training failed (exit \$EXIT_CODE)" >> /workspace/training.log; fi' &`
+      `nohup bash -c '> /workspace/training.log; SCRIPT=\$(find /workspace -maxdepth 5 -name "${trainScript}" 2>/dev/null | head -1); if [ -z "\$SCRIPT" ]; then echo "ERROR: ${trainScript} not found" >> /workspace/training.log; exit 1; fi; PYTHON=""; for P in /venv/bin/python3 /venv/bin/python /opt/conda/bin/python3 /workspace/venv/bin/python3 /workspace/venv/bin/python /usr/local/bin/python3; do if [ -f "\$P" ] && "\$P" -c "import accelerate" 2>/dev/null; then PYTHON="\$P"; break; fi; done; if [ -z "\$PYTHON" ]; then echo "ERROR: no Python with accelerate found" >> /workspace/training.log; exit 1; fi; ACCEL=\$(dirname "\$PYTHON")/accelerate; mkdir -p /workspace/output; echo "launcher: \$ACCEL" >> /workspace/training.log; export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True; cd "\$(dirname "\$SCRIPT")" && "\$ACCEL" launch --num_cpu_threads_per_process 1 "\$SCRIPT" --dataset_config /workspace/kohya_config.toml --pretrained_model_name_or_path /workspace/models/${modelBaseName} --output_dir /workspace/output --output_name ${character.triggerWord}_lora --save_model_as safetensors --max_train_steps ${config.steps} ${lrFlagStr} --lr_scheduler ${lrScheduler} ${lrWarmupFlag} --optimizer_type ${config.optimizer} ${optimizerArgs} --network_module networks.lora --network_dim ${config.networkDim} --network_alpha ${networkAlpha} ${noiseOffsetFlag} ${minSnrFlag} ${vPredFlag} ${noHalfVaeFlag} --mixed_precision bf16 --save_precision fp16 ${gradCkptFlag} ${cacheLatentsFlag} --save_every_n_steps ${saveEveryNSteps} >> /workspace/training.log 2>&1; EXIT_CODE=\$?; echo "training complete" >> /workspace/training.log; if [ \$EXIT_CODE -eq 0 ]; then echo "done" > /workspace/.training_done; else echo "training failed (exit \$EXIT_CODE)" >> /workspace/training.log; fi' &`
     );
     setPipelineStep(3);
     setTrainingHalted(false);
@@ -613,7 +698,7 @@ export default function RunPodLauncher() {
       // Handle base model checkpoint
       setPipelineStep(2);
       const modelName = (character.baseModel || "model.safetensors").replace(/\s*\[.*?\]\s*$/, "").trim();
-      const modelBaseName = modelName.split(/[\\/]/).pop() || "model.safetensors";
+      const modelBaseName = sanitizeShellArg(modelName.split(/[\\/]/).pop() || "model.safetensors");
 
       let modelOnVolume = false;
       try {
@@ -696,11 +781,13 @@ export default function RunPodLauncher() {
         : files.filter(f => !/-step\d+/.test(f));
 
       log(`Found ${files.length} file(s), downloading ${toDownload.length}…`);
-      for (const remotePath of toDownload) {
+      for (let i = 0; i < toDownload.length; i++) {
+        const remotePath = toDownload[i];
         const filename = remotePath.split("/").pop()!;
         const localPath = `${destDir}/${filename}`;
-        log(`Downloading ${filename}…`);
-        const stopDownloadTicker = startTicker(`Downloading ${filename}…`);
+        const fileLabel = toDownload.length > 1 ? `${filename} (${i + 1}/${toDownload.length})` : filename;
+        log(`Downloading ${fileLabel}…`);
+        const stopDownloadTicker = startTicker(`Downloading ${fileLabel}…`);
         await invoke("jupyter_download_file", {
           jupyterUrl: jUrl,
           password: JUPYTER_PASS,
@@ -737,8 +824,28 @@ export default function RunPodLauncher() {
     const JUPYTER_PASS = "lorastudio";
     let seenLines = fromLine;
     let inTraceback = false;
+    let detected = false;
+
+    // Called at most once — prevents double-download if both sentinel and log detect completion
+    const triggerCompletion = () => {
+      if (detected) return;
+      detected = true;
+      if (_logPollId) { clearInterval(_logPollId); _logPollId = null; }
+      setUploadStatus(null);
+      downloadOutputs(jUrl);
+    };
+
     if (_logPollId) clearInterval(_logPollId);
     _logPollId = setInterval(async () => {
+      // Sentinel file check — training script writes .training_done on success.
+      // This file is tiny and always readable, unlike training.log which can grow to many MB
+      // of tqdm output and silently fail to load via the Jupyter Contents API.
+      invoke<string>("jupyter_read_file", {
+        jupyterUrl: jUrl,
+        password: JUPYTER_PASS,
+        remotePath: "workspace/.training_done",
+      }).then(() => triggerCompletion()).catch(() => {});
+
       try {
         const content = await invoke<string>("jupyter_read_file", {
           jupyterUrl: jUrl,
@@ -782,16 +889,16 @@ export default function RunPodLauncher() {
 
         const newContent = newLines.join("\n");
         // Stop polling on completion or fatal halt (check only new lines to avoid re-triggering)
-        if (/training (finished|complete|done)|^training complete$/im.test(newContent)) {
-          if (_logPollId) { clearInterval(_logPollId); _logPollId = null; }
-          setUploadStatus(null);
-          downloadOutputs(jUrl);
-        } else if (/training failed \(exit|ModuleNotFoundError|No module named|command not found/i.test(newContent)) {
+        // Check failure FIRST — the training script always writes "training complete" before
+        // "training failed (exit N)", so if both appear we must not treat it as success.
+        if (/training failed \(exit|ModuleNotFoundError|No module named|command not found/i.test(newContent)) {
           if (_logPollId) { clearInterval(_logPollId); _logPollId = null; }
           if (_podPollId) { clearInterval(_podPollId); _podPollId = null; setPolling(false); }
           log(`Training halted — see errors above.`);
           log(`Pod is still running — use Retry to relaunch, or Terminate to stop billing.`);
           setTrainingHalted(true);
+        } else if (/training (finished|complete|done)|^training complete$/im.test(newContent)) {
+          triggerCompletion();
         }
       } catch { /* file not yet available */ }
     }, 5000);
@@ -1336,6 +1443,26 @@ export default function RunPodLauncher() {
                 })}
               </div>
             </div>
+            {/* V-Prediction toggle */}
+            <div style={{ display: "flex", alignItems: "center", gap: "8px", marginTop: "6px" }}>
+              <label style={{ display: "flex", alignItems: "center", gap: "5px", cursor: "pointer", fontFamily: "var(--font-body)", fontSize: "11px", color: config.vPrediction ? "var(--text)" : "var(--text-muted)" }}>
+                <input
+                  type="checkbox"
+                  checked={config.vPrediction}
+                  onChange={(e) => setConfig({ vPrediction: e.target.checked })}
+                  style={{ accentColor: "var(--accent)" }}
+                />
+                V-Prediction mode
+              </label>
+              {config.vPrediction && (
+                <span style={{ fontFamily: "var(--font-mono)", fontSize: "9px", color: "var(--accent-dim)" }}>
+                  --v_parameterization --zero_terminal_snr
+                </span>
+              )}
+            </div>
+            <div style={{ fontFamily: "var(--font-body)", fontStyle: "italic", fontSize: "11px", color: "var(--text-muted)", marginTop: "3px", marginBottom: "4px" }}>
+              Enable for NoobAI-XL and other v-pred models. Standard SDXL uses epsilon — leave off.
+            </div>
             {/* Optimizer selector */}
             <div style={{ display: "flex", gap: "4px", marginTop: "6px", marginBottom: "8px" }}>
               {(["AdamW8bit", "Prodigy", "DAdaptAdam"] as const).map((opt) => (
@@ -1362,11 +1489,18 @@ export default function RunPodLauncher() {
             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "8px", marginTop: "6px" }}>
               {[
                 { label: "Steps", key: "steps" as const, type: "number" },
-                { label: "LR", key: "learningRate" as const, type: "text" },
+                { label: "UNet LR", key: "unetLr" as const, type: "text" },
+                { label: "Text Encoder LR", key: "textEncoderLr" as const, type: "text" },
                 { label: "Network Dim", key: "networkDim" as const, type: "number" },
+                { label: "Network Alpha", key: "networkAlpha" as const, type: "number" },
                 { label: "Resolution", key: "resolution" as const, type: "number" },
+                { label: "Noise Offset", key: "noiseOffset" as const, type: "number" },
+                { label: "Min SNR Gamma", key: "minSnrGamma" as const, type: "number" },
                 { label: "Container Disk (GB)", key: "containerDiskInGb" as const, type: "number" },
               ].map(({ label, key, type }) => {
+                const isLrKey = key === "unetLr" || key === "textEncoderLr";
+                const isAlphaKey = key === "networkAlpha";
+                const disabledByAdaptive = (isLrKey || isAlphaKey) && (config.optimizer === "Prodigy" || config.optimizer === "DAdaptAdam");
                 const suggestedSteps = approved.length > 0
                   ? Math.max(500, Math.min(4000, Math.round(approved.length * 100 / 100) * 100))
                   : null;
@@ -1375,10 +1509,16 @@ export default function RunPodLauncher() {
                     <div style={{ fontFamily: "var(--font-mono)", fontSize: "9px", color: "var(--text-muted)", marginBottom: "3px", letterSpacing: "0.06em", textTransform: "uppercase" }}>{label}</div>
                     <input
                       type={type}
-                      style={{ width: "100%", opacity: key === "learningRate" && (config.optimizer === "Prodigy" || config.optimizer === "DAdaptAdam") ? 0.4 : 1 }}
+                      step={key === "noiseOffset" ? "0.001" : undefined}
+                      style={{ width: "100%", opacity: disabledByAdaptive ? 0.4 : 1 }}
                       value={config[key]}
-                      onChange={(e) => setConfig({ [key]: type === "number" ? parseInt(e.target.value) || 0 : e.target.value })}
-                      disabled={key === "learningRate" && (config.optimizer === "Prodigy" || config.optimizer === "DAdaptAdam")}
+                      onChange={(e) => {
+                        const val = type === "number"
+                          ? (key === "noiseOffset" ? parseFloat(e.target.value) || 0 : parseInt(e.target.value) || 0)
+                          : e.target.value;
+                        setConfig({ [key]: val });
+                      }}
+                      disabled={disabledByAdaptive}
                     />
                     {key === "steps" && suggestedSteps && config.steps !== suggestedSteps && (
                       <div
@@ -1401,7 +1541,24 @@ export default function RunPodLauncher() {
               color: "var(--text-muted)",
               lineHeight: 1.5,
             }}>
-              Recommended for Illustrious: dim=32, alpha=16, lr=1e-4, 1500–2500 steps depending on dataset size. For SDXL character LoRAs, dim=32 is preferred — higher rank absorbs style and colour from training data.
+              Recommended for Illustrious: dim=32, alpha=16, unet_lr=5e-5, te_lr=1e-5, 1500–2500 steps. For SDXL character LoRAs, dim=32 is preferred — higher rank absorbs style and colour from training data. Noise offset and min SNR gamma are ignored for SDXL.
+            </div>
+            <div style={{ marginTop: "8px" }}>
+              <button
+                onClick={() => {
+                  navigator.clipboard.writeText(buildTrainingCommand());
+                  setCommandCopied(true);
+                  setTimeout(() => setCommandCopied(false), 2000);
+                }}
+                style={{
+                  padding: "3px 10px", fontSize: "10px", cursor: "pointer",
+                  background: "var(--bg-2)", border: "1px solid var(--border)",
+                  color: commandCopied ? "var(--accent-bright)" : "var(--text-muted)",
+                  borderRadius: "4px", fontFamily: "var(--font-mono)", letterSpacing: "0.04em",
+                }}
+              >
+                {commandCopied ? "✓ copied" : "copy training command"}
+              </button>
             </div>
             <div style={{ marginTop: "10px", display: "flex", alignItems: "center", gap: "16px" }}>
               {[
@@ -1745,13 +1902,13 @@ export default function RunPodLauncher() {
                 </span>
               )}
             </div>
+            {uploadStatus && (
+              <div style={{ color: "var(--accent-bright)", display: "flex", alignItems: "center", gap: "8px", padding: "4px 20px 4px", flexShrink: 0, borderBottom: "1px solid var(--border)" }}>
+                <RefreshCw size={10} style={{ animation: "spin 1s linear infinite", flexShrink: 0 }} />
+                {uploadStatus}
+              </div>
+            )}
             <div ref={logScrollRef} style={{ flex: 1, overflow: "auto", padding: "0 20px 16px" }}>
-              {uploadStatus && (
-                <div style={{ color: "var(--accent-bright)", display: "flex", alignItems: "center", gap: "8px", marginBottom: "6px" }}>
-                  <RefreshCw size={10} style={{ animation: "spin 1s linear infinite", flexShrink: 0 }} />
-                  {uploadStatus}
-                </div>
-              )}
               {logs.length === 0 && !uploadStatus && (
                 <div style={{ color: "var(--text-muted)" }}>
                   Ready. Package your dataset to begin.

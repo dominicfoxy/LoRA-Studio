@@ -1,5 +1,33 @@
 # LoRA Studio — Changelog
 
+## [v1.0.5-alpha]
+
+- **Dynamic prompts export no longer includes character trigger word** — the trigger word is only meaningful when the character LoRA is loaded; the export is used before the LoRA exists. Outfit-level trigger words (for pre-existing outfit LoRAs) are unaffected.
+- **Batch generation no longer OOMs Forge** — added `override_settings_restore_afterwards: false` alongside the model checkpoint override. Previously Forge was restoring the original checkpoint after every single image (its default), causing it to load and unload the model on each generation — briefly holding two copies in VRAM and OOMing on longer batches.
+- **Generator Settings: sampler list cleaned up** — removed old Karras/SDE-suffixed sampler names (`DPM++ 2M Karras`, `DPM++ 2M SDE Karras`, etc.) since the separate scheduler dropdown already handles the noise schedule. Mixing both paradigms in one list was confusing.
+- **Generator Settings: default sampler** changed from `DPM++ 2M Karras` to `DPM++ 2M` — correctly pairs with the existing `Karras` scheduler default instead of embedding the schedule in both places.
+- **Generator Settings: steps max** raised from 80 to 150; hint updated to note Euler a / DDIM benefit from more steps than DPM++ samplers.
+- **Generator Settings: CFG hint** now covers both SDXL/Illustrious (5–9) and SD1.5 (7) rather than assuming Illustrious only.
+
+- **Split UNet / Text Encoder learning rates** — the single LR field is replaced by separate **UNet LR** (default `5e-5`) and **Text Encoder LR** (default `1e-5`) fields. Both are passed as `--unet_lr` / `--text_encoder_lr` in the training command (adaptive optimizers still use `--learning_rate 1.0` as before). Store migrated to v17; existing `learningRate` value is carried forward as the new `unetLr`.
+- **Network Alpha field** — exposed in the hyperparameters UI (default 16). Previously hardcoded to `floor(networkDim / 2)`; now user-controlled. Disabled in adaptive optimizer mode (forced to 1).
+- **Noise Offset field** — configurable in UI (default `0.0357`). Still only applied for SD1.x (skipped for SDXL). Set to 0 to disable.
+- **Min SNR Gamma field** — re-added to UI (default 5, was removed in v1.0.4). Emits `--min_snr_gamma` when > 0; set to 0 to disable.
+- **V-Prediction mode toggle** — checkbox in Training Hyperparameters. When enabled, adds `--v_parameterization --zero_terminal_snr` to the training command. Required for NoobAI-XL and other v-pred models; must be left off for standard SDXL (epsilon). Store migrated to v18.
+- **Status line no longer scrolls off** — `uploadStatus` moved outside the log scroll container so it stays pinned at the top of the log panel.
+- **Copy Training Command button** — in the Training Hyperparameters section; generates the full `accelerate launch` command from current settings and copies to clipboard. No active pod required. Useful for verifying hyperparameter changes before launching.
+- **Checkpoint local path no longer autofills from Forge model** — removed a `useEffect` that was incorrectly pre-populating the RunPod local model path with the Forge model identifier (a different field for a different system).
+- **Download counter** — per-file status now shows `filename (1/3)` when downloading multiple files.
+- **Purge failure count surfaced** — `purgeDirectory` now counts files that could not be deleted and shows a dismissible banner with the count. Previously all errors were silently swallowed.
+- **Orphaned tooltip on card delete fixed** — `ImageCard` now calls `onPromptLeave` on unmount, so the prompt tooltip clears when a card is deleted while hovered.
+- **Caption Editor: Save All progress bar** — a status bar appears while Save All is running, showing `Saving captions… X / Y` with a progress bar. On completion, flashes "✓ Saved N captions" for 3 seconds. Per-caption errors are now caught and reported as a count rather than silently ignored.
+- **`addTagToAll` error handling** — save loop now catches per-image failures, continues the remaining images, and reports a total error count. Previously a single failure would abort the loop silently.
+- **Save & Close failure surfaced** — `saveAndClose` now wraps the project save in try/catch. On failure it shows an error in the close dialog and does not close the app. Previously a failed save would leave the app in an ambiguous state.
+- **Polling interval cleanup on unmount** — `RunPodLauncher` now clears all three module-level intervals (`_podPollId`, `_logPollId`, `_jupyterWaitId`) on unmount. Previously navigating away and back accumulated duplicate polling intervals.
+- **Shell arg sanitisation for model filename** — `modelBaseName` is now stripped of `"`, `$`, backtick, and `\` before interpolation into the bash training command. `sanitizeShellArg()` helper added at module level; applied at all three derivation sites including `buildTrainingCommand`.
+
+---
+
 ## [v1.0.4-alpha]
 
 - **SDXL `--no_half_vae`** — added for SDXL training only. SDXL's VAE produces NaN corruption in fp16 mode which manifests as colour distortion baked into LoRA weights; forcing fp32 VAE during training prevents this.

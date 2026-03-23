@@ -36,6 +36,7 @@ export default function App() {
   const themeFile = useStore((s) => s.settings.themeFile ?? "");
   const approved = images.filter((i) => i.approved === true).length;
   const [showCloseDialog, setShowCloseDialog] = useState(false);
+  const [saveCloseError, setSaveCloseError] = useState<string | null>(null);
 
   useEffect(() => {
     document.documentElement.style.zoom = String(uiScale);
@@ -76,14 +77,20 @@ export default function App() {
   }, []);
 
   const saveAndClose = async () => {
+    setSaveCloseError(null);
     const { character: c, generation, settings, images: imgs } = useStore.getState();
     if (c.outputDir) {
-      await invoke("ensure_dir", { path: c.outputDir });
-      await invoke("save_project", {
-        path: `${c.outputDir}/project.json`,
-        data: JSON.stringify({ character: c, generation, settings, images: imgs }, null, 2),
-      });
-      markSaved();
+      try {
+        await invoke("ensure_dir", { path: c.outputDir });
+        await invoke("save_project", {
+          path: `${c.outputDir}/project.json`,
+          data: JSON.stringify({ character: c, generation, settings, images: imgs }, null, 2),
+        });
+        markSaved();
+      } catch (e) {
+        setSaveCloseError(`Save failed: ${e}`);
+        return;
+      }
     }
     await invoke("close_app");
   };
@@ -260,11 +267,16 @@ export default function App() {
             <div style={{ fontFamily: "var(--font-display)", fontSize: "16px", fontWeight: 800, color: "var(--text-primary)", marginBottom: "8px" }}>
               Unsaved Changes
             </div>
-            <div style={{ fontFamily: "var(--font-body)", fontSize: "13px", color: "var(--text-secondary)", marginBottom: "24px", lineHeight: 1.5 }}>
+            <div style={{ fontFamily: "var(--font-body)", fontSize: "13px", color: "var(--text-secondary)", marginBottom: saveCloseError ? "12px" : "24px", lineHeight: 1.5 }}>
               {character.outputDir
                 ? "You have unsaved changes. Save before closing?"
                 : "You have unsaved changes but no output directory is set — they cannot be saved."}
             </div>
+            {saveCloseError && (
+              <div style={{ fontFamily: "var(--font-mono)", fontSize: "11px", color: "var(--red, #d47070)", marginBottom: "16px", lineHeight: 1.5 }}>
+                {saveCloseError}
+              </div>
+            )}
             <div style={{ display: "flex", gap: "8px", justifyContent: "flex-end" }}>
               <button
                 onClick={() => setShowCloseDialog(false)}

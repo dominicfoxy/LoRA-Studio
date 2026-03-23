@@ -192,6 +192,8 @@ function ImageCard({ img, selected, focused, onSelect, onFocus, onApprove, onRej
   const [deleting, setDeleting] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
 
+  useEffect(() => () => onPromptLeave(), []);
+
   const loadImage = async () => {
     if (b64 || loading) return;
     setLoading(true);
@@ -282,6 +284,7 @@ export default function BatchGenerator() {
   const [thumbSize, setThumbSize] = useState(220);
   const [confirmPurge, setConfirmPurge] = useState(false);
   const [confirmGenerate, setConfirmGenerate] = useState(false);
+  const [purgeFailCount, setPurgeFailCount] = useState(0);
   const [approvedExpanded, setApprovedExpanded] = useState(false);
   const [autoRequeue, setAutoRequeue] = useState(false);
   const [tooltip, setTooltip] = useState<{ prompt: string; x: number; y: number } | null>(null);
@@ -332,7 +335,7 @@ export default function BatchGenerator() {
               scheduler: generation.scheduler || undefined,
               seed,
               batch_size: 1,
-              ...(character.baseModel ? { override_settings: { sd_model_checkpoint: character.baseModel } } : {}),
+              ...(character.baseModel ? { override_settings: { sd_model_checkpoint: character.baseModel }, override_settings_restore_afterwards: false } : {}),
             },
           });
 
@@ -420,26 +423,29 @@ export default function BatchGenerator() {
     await runGeneration(queue);
   };
 
-  const purgeDirectory = async () => {
+  const purgeDirectory = async (): Promise<number> => {
+    let failures = 0;
     // Delete all store-tracked images
     for (const img of images) {
-      try { await invoke("delete_image", { path: img.path }); } catch {}
+      try { await invoke("delete_image", { path: img.path }); } catch { failures++; }
     }
     // Also sweep the output directory for any orphaned images not in the store
     if (character.outputDir) {
       try {
         const remaining = await invoke<string[]>("list_images_in_dir", { dir: character.outputDir });
         for (const p of remaining) {
-          try { await invoke("delete_image", { path: p }); } catch {}
+          try { await invoke("delete_image", { path: p }); } catch { failures++; }
         }
       } catch {}
     }
     clearImages();
+    return failures;
   };
 
   const purgeAll = async () => {
-    await purgeDirectory();
+    const failures = await purgeDirectory();
     setConfirmPurge(false);
+    if (failures > 0) setPurgeFailCount(failures);
   };
 
   const handleGenerateClick = () => {
@@ -666,6 +672,15 @@ export default function BatchGenerator() {
             color: "var(--text-muted)", borderRadius: "4px",
             fontFamily: "var(--font-display)", fontWeight: 600, letterSpacing: "0.05em",
           }}>Cancel</button>
+        </div>
+      )}
+
+      {purgeFailCount > 0 && (
+        <div style={{ padding: "6px 20px", background: "rgba(154,74,74,0.12)", borderBottom: "1px solid var(--red)", display: "flex", alignItems: "center", gap: "12px", flexShrink: 0 }}>
+          <span style={{ fontFamily: "var(--font-mono)", fontSize: "11px", color: "#d47070", flex: 1 }}>
+            {purgeFailCount} file{purgeFailCount > 1 ? "s" : ""} could not be deleted from disk — they may have already been removed.
+          </span>
+          <button onClick={() => setPurgeFailCount(0)} style={{ padding: "2px 8px", fontSize: "10px", cursor: "pointer", background: "transparent", border: "1px solid var(--red)", color: "#d47070", borderRadius: "4px", fontFamily: "var(--font-display)" }}>Dismiss</button>
         </div>
       )}
 
