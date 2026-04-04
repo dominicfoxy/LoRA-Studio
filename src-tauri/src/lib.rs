@@ -262,32 +262,242 @@ async fn close_app(window: tauri::Window) -> Result<(), String> {
     window.destroy().map_err(|e| e.to_string())
 }
 
+
+
+// ── runpodctl + SSH ───────────────────────────────────────────────────────────
+
+fn runpodctl_path() -> String {
+    let home = std::env::var("HOME").unwrap_or_default();
+    let local_bin = format!("{}/.local/bin/runpodctl", home);
+    if std::path::Path::new(&local_bin).exists() {
+        local_bin
+    } else {
+        "runpodctl".to_string()
+    }
+}
+
 #[tauri::command]
-async fn runpod_graphql(api_key: String, query: String, variables: serde_json::Value) -> Result<serde_json::Value, String> {
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
-        .build()
-        .map_err(|e| e.to_string())?;
+async fn check_runpodctl() -> bool {
+    let home = std::env::var("HOME").unwrap_or_default();
+    let local_bin = format!("{}/.local/bin/runpodctl", home);
+    if std::path::Path::new(&local_bin).exists() {
+        return true;
+    }
+    std::process::Command::new("which")
+        .arg("runpodctl")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
 
-    let body = serde_json::json!({ "query": query, "variables": variables });
+#[tauri::command]
+async fn install_runpodctl() -> Result<String, String> {
+    let home = std::env::var("HOME").map_err(|e| e.to_string())?;
+    let local_bin = format!("{}/.local/bin", home);
+    let dest = format!("{}/runpodctl", local_bin);
+    fs::create_dir_all(&local_bin).map_err(|e| e.to_string())?;
+    let script = format!(
+        "curl -fsSL -o {dest} https://github.com/runpod/runpodctl/releases/latest/download/runpodctl-linux-amd64 && chmod +x {dest}",
+        dest = dest
+    );
+    let output = tokio::task::spawn_blocking(move || {
+        std::process::Command::new("bash").args(["-c", &script]).output()
+    }).await.map_err(|e| e.to_string())?.map_err(|e| e.to_string())?;
+    if !output.status.success() {
+        return Err(format!("Install failed: {}", String::from_utf8_lossy(&output.stderr)));
+    }
+    Ok(dest)
+}
 
+#[tauri::command]
+async fn run_runpodctl(args: Vec<String>, api_key: String) -> Result<String, String> {
+    let bin = runpodctl_path();
+    let output = tokio::task::spawn_blocking(move || {
+        std::process::Command::new(&bin)
+            .args(&args)
+            .env("RUNPOD_API_KEY", &api_key)
+            .output()
+    }).await.map_err(|e| e.to_string())?.map_err(|e| e.to_string())?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+        return Err(format!("{} {}", stderr, stdout).trim().to_string());
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+}
+
+#[tauri::command]
+async fn setup_ssh_key(api_key: String) -> Result<String, String> {
+    let home = std::env::var("HOME").map_err(|e| e.to_string())?;
+    let config_dir = format!("{}/.config/lora-studio", home);
+    let key_path = format!("{}/runpod_id_ed25519", config_dir);
+    fs::create_dir_all(&config_dir).map_err(|e| e.to_string())?;
+    // Generate key pair only if it doesn't exist yet
+    if !std::path::Path::new(&key_path).exists() {
+        let kp = key_path.clone();
+        let gen_out = tokio::task::spawn_blocking(move || {
+            std::process::Command::new("ssh-keygen")
+                .args(["-t", "ed25519", "-f", &kp, "-N", ""])
+                .output()
+        }).await.map_err(|e| e.to_string())?.map_err(|e| e.to_string())?;
+        if !gen_out.status.success() {
+            return Err(format!("ssh-keygen failed: {}", String::from_utf8_lossy(&gen_out.stderr)));
+        }
+    }
+    // Register public key with RunPod (pass key content, not file path)
+    let pub_key_path = format!("{}.pub", key_path);
+    let pub_key_content = fs::read_to_string(&pub_key_path).map_err(|e| e.to_string())?;
+    let pub_key_content = pub_key_content.trim().to_string();
+    let bin = runpodctl_path();
+    let reg_out = tokio::task::spawn_blocking(move || {
+        std::process::Command::new(&bin)
+            .args(["ssh", "add-key", "--key", &pub_key_content])
+            .env("RUNPOD_API_KEY", &api_key)
+            .output()
+    }).await.map_err(|e| e.to_string())?.map_err(|e| e.to_string())?;
+    if !reg_out.status.success() {
+        let stderr = String::from_utf8_lossy(&reg_out.stderr).to_string();
+        let stdout = String::from_utf8_lossy(&reg_out.stdout).to_string();
+        return Err(format!("ssh add-key failed: {} {}", stderr, stdout).trim().to_string());
+    }
+    Ok(key_path)
+}
+
+#[tauri::command]
+async fn run_ssh_command(host: String, port: u16, key_path: String, command: String) -> Result<String, String> {
+    let port_str = port.to_string();
+    let remote = format!("root@{}", host);
+    let output = tokio::task::spawn_blocking(move || {
+        std::process::Command::new("ssh")
+            .args([
+                "-i", &key_path,
+                "-p", &port_str,
+                "-o", "StrictHostKeyChecking=no",
+                "-o", "UserKnownHostsFile=/dev/null",
+                "-o", "ConnectTimeout=10",
+                &remote,
+                &command,
+            ])
+            .output()
+    }).await.map_err(|e| e.to_string())?.map_err(|e| e.to_string())?;
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    if !output.status.success() {
+        return Err(format!("SSH error (exit {}): {}",
+            output.status.code().unwrap_or(-1),
+            if stderr.is_empty() { &stdout } else { &stderr }
+        ));
+    }
+    Ok(stdout)
+}
+
+#[tauri::command]
+async fn ssh_upload_file(host: String, port: u16, key_path: String, local_path: String, remote_path: String) -> Result<(), String> {
+    let port_str = port.to_string();
+    let dest = format!("root@{}:{}", host, remote_path);
+    let output = tokio::task::spawn_blocking(move || {
+        std::process::Command::new("scp")
+            .args([
+                "-i", &key_path,
+                "-P", &port_str,
+                "-o", "StrictHostKeyChecking=no",
+                "-o", "UserKnownHostsFile=/dev/null",
+                &local_path,
+                &dest,
+            ])
+            .output()
+    }).await.map_err(|e| e.to_string())?.map_err(|e| e.to_string())?;
+    if !output.status.success() {
+        return Err(format!("SCP upload failed: {}", String::from_utf8_lossy(&output.stderr)));
+    }
+    Ok(())
+}
+
+#[tauri::command]
+async fn ssh_download_file(host: String, port: u16, key_path: String, remote_path: String, local_path: String) -> Result<(), String> {
+    if let Some(parent) = std::path::Path::new(&local_path).parent() {
+        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    let port_str = port.to_string();
+    let src = format!("root@{}:{}", host, remote_path);
+    let output = tokio::task::spawn_blocking(move || {
+        std::process::Command::new("scp")
+            .args([
+                "-i", &key_path,
+                "-P", &port_str,
+                "-o", "StrictHostKeyChecking=no",
+                "-o", "UserKnownHostsFile=/dev/null",
+                &src,
+                &local_path,
+            ])
+            .output()
+    }).await.map_err(|e| e.to_string())?.map_err(|e| e.to_string())?;
+    if !output.status.success() {
+        return Err(format!("SCP download failed: {}", String::from_utf8_lossy(&output.stderr)));
+    }
+    Ok(())
+}
+
+#[tauri::command]
+async fn ssh_is_ready(host: String, port: u16, key_path: String) -> Result<bool, String> {
+    let port_str = port.to_string();
+    let remote = format!("root@{}", host);
+    let output = tokio::task::spawn_blocking(move || {
+        std::process::Command::new("ssh")
+            .args([
+                "-i", &key_path,
+                "-p", &port_str,
+                "-o", "StrictHostKeyChecking=no",
+                "-o", "UserKnownHostsFile=/dev/null",
+                "-o", "ConnectTimeout=5",
+                "-o", "BatchMode=yes",
+                &remote,
+                "exit 0",
+            ])
+            .output()
+    }).await.map_err(|e| e.to_string())?.map_err(|e| e.to_string())?;
+    Ok(output.status.success())
+}
+
+// ── RunPod GraphQL (pricing only — CORS blocks fetch() from webview) ──────────
+
+#[tauri::command]
+async fn fetch_gpu_prices(api_key: String) -> Result<serde_json::Value, String> {
+    let body = serde_json::json!({
+        "query": "{ gpuTypes { displayName lowestPrice(input: { gpuCount: 1 }) { minimumBidPrice uninterruptablePrice } } }"
+    });
+    let client = reqwest::Client::new();
     let res = client
         .post("https://api.runpod.io/graphql")
+        .header("Content-Type", "application/json")
         .header("Authorization", format!("Bearer {}", api_key))
         .json(&body)
         .send()
         .await
-        .map_err(|e| format!("Request failed: {}", e))?;
-
-    if !res.status().is_success() {
-        let status = res.status();
-        let text = res.text().await.unwrap_or_default();
-        return Err(format!("RunPod error {}: {}", status, text));
-    }
-
-    res.json::<serde_json::Value>().await.map_err(|e| format!("Parse error: {}", e))
+        .map_err(|e| e.to_string())?;
+    let json: serde_json::Value = res.json().await.map_err(|e| e.to_string())?;
+    Ok(json)
 }
 
+#[tauri::command]
+async fn fetch_pod_ssh(api_key: String, pod_id: String) -> Result<serde_json::Value, String> {
+    let query = format!(
+        r#"{{ pod(input: {{ podId: "{}" }}) {{ id runtime {{ ports {{ ip isIpPublic privatePort publicPort type }} uptimeInSeconds }} }} }}"#,
+        pod_id
+    );
+    let body = serde_json::json!({ "query": query });
+    let client = reqwest::Client::new();
+    let res = client
+        .post("https://api.runpod.io/graphql")
+        .header("Content-Type", "application/json")
+        .header("Authorization", format!("Bearer {}", api_key))
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    let json: serde_json::Value = res.json().await.map_err(|e| e.to_string())?;
+    Ok(json)
+}
 
 #[tauri::command]
 async fn list_lora_files(dir: String) -> Result<Vec<String>, String> {
@@ -308,300 +518,6 @@ async fn list_lora_files(dir: String) -> Result<Vec<String>, String> {
     Ok(files)
 }
 
-// ── Jupyter helpers ───────────────────────────────────────────────────────────
-
-// Returns (client, xsrf_token, cookie_header_for_websocket)
-async fn jupyter_client_login(jupyter_url: &str, password: &str) -> Result<(reqwest::Client, String, String), String> {
-    // No-redirect client to capture Set-Cookie from the 302 login response directly
-    let bare = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(60))
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-        .map_err(|e| e.to_string())?;
-
-    let login_url = format!("{}/login", jupyter_url);
-
-    // GET login page — _xsrf cookie comes back in Set-Cookie
-    let get_res = bare.get(&login_url).send().await.map_err(|e| e.to_string())?;
-
-    // Collect all cookies from GET response
-    let mut cookies: Vec<String> = get_res.headers()
-        .get_all("set-cookie")
-        .iter()
-        .filter_map(|v| v.to_str().ok())
-        .filter_map(|s| s.split(';').next())
-        .map(|s| s.to_string())
-        .collect();
-
-    // Extract _xsrf value
-    let xsrf = cookies.iter()
-        .find(|s| s.contains("_xsrf="))
-        .and_then(|s| s.split("_xsrf=").nth(1))
-        .map(|s| s.to_string())
-        .unwrap_or_default();
-
-    let xsrf = if xsrf.is_empty() {
-        let html = get_res.text().await.unwrap_or_default();
-        html.split("_xsrf").find_map(|chunk| {
-            chunk.split("value=\"").nth(1).and_then(|s| {
-                let v = s.split('"').next().unwrap_or("");
-                if v.is_empty() { None } else { Some(v.to_string()) }
-            })
-        }).unwrap_or_default()
-    } else {
-        xsrf
-    };
-
-    // Build Cookie header to send with POST (so server can validate _xsrf)
-    let cookie_for_post = cookies.join("; ");
-
-    // POST login with no-redirect so we get the 302 Set-Cookie directly
-    let body = format!("_xsrf={}&password={}", urlencoding::encode(&xsrf), urlencoding::encode(password));
-    let post_res = bare.post(&login_url)
-        .header("Content-Type", "application/x-www-form-urlencoded")
-        .header("X-XSRFToken", &xsrf)
-        .header("Cookie", &cookie_for_post)
-        .body(body)
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
-
-    // Session cookie is in the 302 response Set-Cookie (before redirect)
-    for val in post_res.headers().get_all("set-cookie").iter() {
-        if let Ok(s) = val.to_str() {
-            if let Some(nv) = s.split(';').next() {
-                let name = nv.split('=').next().unwrap_or("");
-                if !cookies.iter().any(|c| c.split('=').next() == Some(name)) {
-                    cookies.push(nv.to_string());
-                }
-            }
-        }
-    }
-
-    let cookie_header = cookies.join("; ");
-
-    // Plain client — no cookie store; callers pass Cookie header explicitly
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(300))
-        .build()
-        .map_err(|e| e.to_string())?;
-
-    Ok((client, xsrf, cookie_header))
-}
-
-#[tauri::command]
-async fn jupyter_is_ready(jupyter_url: String, _password: String) -> bool {
-    // Lightweight readiness probe — single GET to the login page with a short timeout.
-    // If Jupyter is listening and returning HTTP (any non-5xx), it's ready.
-    // Avoids the 3-request / 60s-timeout login flow, which caused slow detection and
-    // pileup when the server wasn't yet responding.
-    let client = match reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(8))
-        .build()
-    {
-        Ok(c) => c,
-        Err(_) => return false,
-    };
-    client.get(format!("{}/login", jupyter_url))
-        .send().await
-        .map(|r| r.status().as_u16() < 500)
-        .unwrap_or(false)
-}
-
-#[tauri::command]
-async fn jupyter_upload_file(jupyter_url: String, password: String, remote_path: String, local_path: String) -> Result<(), String> {
-    let (client, xsrf, cookie_header) = jupyter_client_login(&jupyter_url, &password).await?;
-
-    let mut file = fs::File::open(&local_path).map_err(|e| e.to_string())?;
-    let mut buf = Vec::new();
-    file.read_to_end(&mut buf).map_err(|e| e.to_string())?;
-    let b64 = general_purpose::STANDARD.encode(&buf);
-
-    let url = format!("{}/api/contents/{}", jupyter_url, remote_path);
-    let body = serde_json::json!({ "type": "file", "format": "base64", "content": b64 });
-
-    let res = client.put(&url)
-        .header("Cookie", &cookie_header)
-        .header("X-XSRFToken", &xsrf)
-        .header("Content-Type", "application/json")
-        .json(&body)
-        .send()
-        .await
-        .map_err(|e| format!("Upload request failed: {}", e))?;
-
-    if !res.status().is_success() {
-        let status = res.status();
-        let text = res.text().await.unwrap_or_default();
-        return Err(format!("Jupyter upload failed ({}): {}", status, text));
-    }
-    Ok(())
-}
-
-#[tauri::command]
-async fn jupyter_run_command(jupyter_url: String, password: String, command: String) -> Result<(), String> {
-    jupyter_terminal_send(&jupyter_url, &password, &command, None).await
-}
-
-
-async fn jupyter_terminal_send(jupyter_url: &str, password: &str, command: &str, wait_secs: Option<u64>) -> Result<(), String> {
-    use tokio_tungstenite::tungstenite::Message;
-    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
-    use tokio_tungstenite::tungstenite::http::header;
-    use futures_util::{SinkExt, StreamExt};
-
-    let (client, xsrf, cookie_header) = jupyter_client_login(jupyter_url, password).await?;
-
-    // Create a new terminal — verify it succeeds and capture the terminal name
-    let term_url = format!("{}/api/terminals", jupyter_url);
-    let term_res = client.post(&term_url)
-        .header("Cookie", &cookie_header)
-        .header("X-XSRFToken", &xsrf)
-        .json(&serde_json::json!({}))
-        .send()
-        .await
-        .map_err(|e| format!("Terminal create failed: {}", e))?;
-
-    if !term_res.status().is_success() {
-        let status = term_res.status();
-        let body = term_res.text().await.unwrap_or_default();
-        return Err(format!("Could not create terminal ({}): {}", status, body));
-    }
-
-    let term: serde_json::Value = term_res.json().await.map_err(|e| e.to_string())?;
-    // name may be a JSON string or number depending on Jupyter version
-    let term_name = term["name"].as_str()
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| term["name"].as_i64().unwrap_or(1).to_string());
-
-    // Build WSS URL
-    let ws_url = format!(
-        "{}/terminals/websocket/{}",
-        jupyter_url.replace("https://", "wss://").replace("http://", "ws://"),
-        term_name
-    );
-
-    // Use into_client_request() — the correct tungstenite API that sets Method + Host
-    let mut request = ws_url.as_str()
-        .into_client_request()
-        .map_err(|e| format!("WS request build failed: {}", e))?;
-
-    {
-        let h = request.headers_mut();
-        use tokio_tungstenite::tungstenite::http::header::InvalidHeaderValue;
-        let parse = |s: &str| -> Result<tokio_tungstenite::tungstenite::http::HeaderValue, String> {
-            s.parse::<tokio_tungstenite::tungstenite::http::HeaderValue>().map_err(|e: InvalidHeaderValue| e.to_string())
-        };
-        h.insert(header::ORIGIN,    parse(jupyter_url)?);
-        h.insert(header::COOKIE,    parse(&cookie_header)?);
-        h.insert("x-xsrftoken",     parse(&xsrf)?);
-        h.insert("sec-websocket-protocol", parse("v1.terminal.jupyter.org")?);
-    }
-
-    let (mut ws, _) = tokio_tungstenite::connect_async(request)
-        .await
-        .map_err(|e| {
-            // Expose HTTP status when the server rejects the upgrade
-            let detail = match &e {
-                tokio_tungstenite::tungstenite::Error::Http(resp) => {
-                    format!("HTTP {} (url={})", resp.status(), ws_url)
-                }
-                other => format!("{:?} (url={})", other, ws_url),
-            };
-            format!("WS connect failed: {}", detail)
-        })?;
-
-    // Send command
-    let msg = serde_json::json!(["stdin", format!("{}\n", command)]);
-    ws.send(Message::Text(msg.to_string()))
-        .await
-        .map_err(|e| format!("WS send failed: {}", e))?;
-
-    if let Some(secs) = wait_secs {
-        // Wait for "DONE" marker in terminal output, up to `secs` seconds
-        let deadline = std::time::Duration::from_secs(secs);
-        let result = tokio::time::timeout(deadline, async {
-            while let Some(Ok(msg)) = ws.next().await {
-                if let Message::Text(text) = msg {
-                    if let Ok(arr) = serde_json::from_str::<serde_json::Value>(&text) {
-                        if let Some(content) = arr.get(1).and_then(|v| v.as_str()) {
-                            if content.contains("DONE") {
-                                return;
-                            }
-                        }
-                    }
-                }
-            }
-        }).await;
-        if result.is_err() {
-            // Timeout — command may still be running; not fatal
-        }
-    } else {
-        // Fire and forget — give the terminal 300ms to process before closing
-        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-    }
-
-    let _ = ws.close(None).await;
-    Ok(())
-}
-
-#[tauri::command]
-async fn jupyter_list_dir(jupyter_url: String, password: String, remote_path: String) -> Result<Vec<String>, String> {
-    let (client, _xsrf, cookie_header) = jupyter_client_login(&jupyter_url, &password).await?;
-    let url = format!("{}/api/contents/{}?content=1&type=directory", jupyter_url, remote_path);
-    let res = client.get(&url)
-        .header("Cookie", &cookie_header)
-        .send().await
-        .map_err(|e| e.to_string())?;
-    if !res.status().is_success() {
-        return Err(format!("list failed ({})", res.status()));
-    }
-    let json: serde_json::Value = res.json().await.map_err(|e| e.to_string())?;
-    let names = json["content"].as_array()
-        .ok_or("missing content field")?
-        .iter()
-        .filter_map(|f| f["name"].as_str().map(|n| n.to_string()))
-        .collect();
-    Ok(names)
-}
-
-#[tauri::command]
-async fn jupyter_download_file(jupyter_url: String, password: String, remote_path: String, local_path: String) -> Result<(), String> {
-    let (_client, _xsrf, cookie_header) = jupyter_client_login(&jupyter_url, &password).await?;
-    // Use /files/ endpoint for direct binary streaming — avoids base64 overhead and 60s login-client timeout
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(600))
-        .build()
-        .map_err(|e| e.to_string())?;
-    let url = format!("{}/files/{}", jupyter_url, remote_path);
-    let res = client.get(&url)
-        .header("Cookie", &cookie_header)
-        .send().await
-        .map_err(|e| e.to_string())?;
-    if !res.status().is_success() {
-        return Err(format!("download failed ({}): {}", res.status(), url));
-    }
-    let bytes = res.bytes().await.map_err(|e| e.to_string())?;
-    if let Some(parent) = std::path::Path::new(&local_path).parent() {
-        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-    }
-    fs::write(&local_path, &bytes).map_err(|e| e.to_string())?;
-    Ok(())
-}
-
-#[tauri::command]
-async fn jupyter_read_file(jupyter_url: String, password: String, remote_path: String) -> Result<String, String> {
-    let (client, _xsrf, cookie_header) = jupyter_client_login(&jupyter_url, &password).await?;
-    let url = format!("{}/api/contents/{}?content=1&format=text&type=file", jupyter_url, remote_path);
-    let res = client.get(&url)
-        .header("Cookie", &cookie_header)
-        .send().await
-        .map_err(|e| e.to_string())?;
-    if !res.status().is_success() {
-        return Err(format!("read failed ({})", res.status()));
-    }
-    let json: serde_json::Value = res.json().await.map_err(|e| e.to_string())?;
-    Ok(json["content"].as_str().unwrap_or("").to_string())
-}
 
 pub fn run() {
     tauri::Builder::default()
@@ -635,13 +551,16 @@ pub fn run() {
             path_exists,
             list_lora_files,
             close_app,
-            runpod_graphql,
-            jupyter_is_ready,
-            jupyter_upload_file,
-            jupyter_run_command,
-            jupyter_read_file,
-            jupyter_list_dir,
-            jupyter_download_file,
+            check_runpodctl,
+            install_runpodctl,
+            run_runpodctl,
+            setup_ssh_key,
+            run_ssh_command,
+            ssh_upload_file,
+            ssh_download_file,
+            ssh_is_ready,
+            fetch_gpu_prices,
+            fetch_pod_ssh,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

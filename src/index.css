@@ -25,8 +25,10 @@
   --green: #4a9a6a;
   --green-dim: rgba(74, 154, 106, 0.15);
   --red: #9a4a4a;
+  --red-bright: #d47070;
   --red-dim: rgba(154, 74, 74, 0.15);
   --blue: #4a7a9a;
+  --blue-dim: rgba(74, 122, 154, 0.12);
 
   /* Typography */
   --font-display: 'Syne', sans-serif;
@@ -112,7 +114,7 @@ button {
 
 .btn-danger {
   background: var(--red-dim);
-  color: #d47070;
+  color: var(--red-bright);
   border: 1px solid var(--red);
 }
 .btn-danger:hover { background: var(--red); color: var(--text-primary); }

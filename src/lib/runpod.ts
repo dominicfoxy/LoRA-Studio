@@ -1,4 +1,4 @@
-// RunPod REST API client for pod management and dataset upload
+// RunPod management via runpodctl CLI + SSH
 
 import { invoke } from "@tauri-apps/api/core";
 
@@ -34,149 +34,177 @@ export interface Pod {
   costPerHr?: number;
 }
 
-async function gql(apiKey: string, query: string, variables?: Record<string, unknown>) {
-  const json = await invoke<{ data?: Record<string, unknown>; errors?: Array<{ message: string }> }>(
-    "runpod_graphql",
-    { apiKey, query, variables: variables ?? {} }
-  );
-  if (json.errors) throw new Error(json.errors[0].message);
-  return json.data!;
+export interface SshInfo {
+  host: string;
+  port: number;
 }
 
-export async function listNetworkVolumes(apiKey: string): Promise<NetworkVolume[]> {
-  const data = await gql(apiKey, `
-    query {
-      myself {
-        networkVolumes {
-          id
-          name
-          size
-          dataCenterId
-        }
-      }
-    }
-  `);
-  return (data.myself as any).networkVolumes ?? [];
+// ── GraphQL pricing (fetch() is fine — external URL) ──────────────────────────
+
+export interface GpuPrice {
+  secure: number;   // uninterruptablePrice
+  community: number; // minimumBidPrice
 }
 
-export async function listGpuTypes(apiKey: string, dataCenterId?: string): Promise<Array<{ id: string; displayName: string; memoryInGb: number; secureCloud: boolean; communityCloud: boolean; lowestPrice?: { minimumBidPrice: number; uninterruptablePrice: number } }>> {
-  // Try datacenter-filtered query first; fall back to global if the field isn't supported
-  const tryQuery = async (withDc: boolean) => {
-    const input = withDc && dataCenterId ? `(input: { dataCenterId: "${dataCenterId}" })` : "";
-    const data = await gql(apiKey, `
-      query {
-        gpuTypes${input} {
-          id
-          displayName
-          memoryInGb
-          secureCloud
-          communityCloud
-          lowestPrice(input: { gpuCount: 1 }) {
-            minimumBidPrice
-            uninterruptablePrice
-          }
-        }
-      }
-    `);
-    return (data as any).gpuTypes as any[];
-  };
-
-  if (dataCenterId) {
-    try {
-      return await tryQuery(true);
-    } catch {
-      // dataCenterId filter not supported — fall back to global
+// Returns a map of displayName → prices. Missing entries = no pricing data available.
+export async function fetchGpuPrices(apiKey: string): Promise<Map<string, GpuPrice>> {
+  const json = await invoke<any>("fetch_gpu_prices", { apiKey });
+  const types: any[] = json?.data?.gpuTypes ?? [];
+  const map = new Map<string, GpuPrice>();
+  for (const g of types) {
+    if (g.displayName && g.lowestPrice) {
+      map.set(g.displayName, {
+        secure: g.lowestPrice.uninterruptablePrice ?? 0,
+        community: g.lowestPrice.minimumBidPrice ?? 0,
+      });
     }
   }
-  return await tryQuery(false);
+  return map;
+}
+
+// ── runpodctl helpers ──────────────────────────────────────────────────────────
+
+function tryParseJson(text: string): unknown | null {
+  try {
+    return JSON.parse(text);
+  } catch {
+    return null;
+  }
+}
+
+async function runpodctl(args: string[], apiKey: string): Promise<string> {
+  return invoke<string>("run_runpodctl", { args, apiKey });
+}
+
+export async function checkRunpodctl(): Promise<boolean> {
+  return invoke<boolean>("check_runpodctl");
+}
+
+export async function installRunpodctl(): Promise<string> {
+  return invoke<string>("install_runpodctl");
+}
+
+export async function setupSshKey(apiKey: string): Promise<string> {
+  return invoke<string>("setup_ssh_key", { apiKey });
+}
+
+// ── Pod management ─────────────────────────────────────────────────────────────
+
+export async function listNetworkVolumes(apiKey: string): Promise<NetworkVolume[]> {
+  const out = await runpodctl(["network-volume", "list"], apiKey);
+  const parsed = tryParseJson(out.trim());
+  if (!parsed || !Array.isArray(parsed)) return [];
+  return parsed.map((v: any) => ({
+    id: v.id ?? v.Id ?? "",
+    name: v.name ?? v.Name ?? "",
+    size: v.size ?? v.Size ?? 0,
+    dataCenterId: v.dataCenterId ?? v.DataCenterId ?? v.dataCenter ?? "",
+  }));
+}
+
+export async function listGpuTypes(apiKey: string): Promise<Array<{ id: string; displayName: string; memoryInGb: number }>> {
+  // Note: runpodctl gpu list does not return pricing data.
+  // GPU IDs from this list may differ in format from RECOMMENDED_GPUS — verify with `runpodctl gpu list`.
+  const out = await runpodctl(["gpu", "list"], apiKey);
+  const parsed = tryParseJson(out.trim());
+  if (!parsed || !Array.isArray(parsed)) return [];
+  return parsed.map((g: any) => ({
+    id: g.gpuId ?? g.id ?? g.Id ?? "",
+    displayName: g.displayName ?? g.name ?? g.Name ?? g.gpuId ?? "",
+    memoryInGb: g.memoryInGb ?? g.memGb ?? g.vram ?? 0,
+  }));
 }
 
 export async function createPod(apiKey: string, spec: PodSpec): Promise<Pod> {
-  const data = await gql(apiKey, `
-    mutation CreatePod($input: PodFindAndDeployOnDemandInput!) {
-      podFindAndDeployOnDemand(input: $input) {
-        id
-        name
-        desiredStatus
-        costPerHr
-      }
-    }
-  `, {
-    input: {
-      name: spec.name,
-      imageName: spec.imageName,
-      gpuTypeId: spec.gpuTypeId,
-      cloudType: spec.cloudType,
-      containerDiskInGb: spec.containerDiskInGb,
-      volumeInGb: spec.volumeInGb,
-      volumeMountPath: spec.volumeMountPath ?? "/workspace",
-      env: spec.env,
-      ...(spec.ports ? { ports: spec.ports } : {}),
-      gpuCount: 1,
-      minVcpuCount: 2,
-      minMemoryInGb: 15,
-      ...(spec.networkVolumeId ? { networkVolumeId: spec.networkVolumeId } : {}),
-      ...(spec.dataCenterId ? { dataCenterId: spec.dataCenterId } : {}),
-    }
-  });
-  const pod = data.podFindAndDeployOnDemand as any;
-  return { ...pod, status: pod.desiredStatus ?? pod.status ?? "PENDING" };
+  const args = [
+    "pod", "create",
+    "--image", spec.imageName,
+    "--name", spec.name,
+    "--gpu-id", spec.gpuTypeId,
+    "--gpu-count", "1",
+    "--cloud-type", spec.cloudType,
+    "--container-disk-in-gb", String(spec.containerDiskInGb),
+    "--volume-in-gb", String(spec.volumeInGb),
+    "--volume-mount-path", spec.volumeMountPath ?? "/workspace",
+    "--ports", spec.ports ?? "22/tcp",
+    ...spec.env.flatMap(e => ["--env", `${e.key}=${e.value}`]),
+    ...(spec.networkVolumeId ? ["--network-volume-id", spec.networkVolumeId] : []),
+    ...(spec.dataCenterId ? ["--data-center-ids", spec.dataCenterId] : []),
+  ];
+  const out = await runpodctl(args, apiKey);
+  const parsed = tryParseJson(out.trim()) as any;
+  if (!parsed) throw new Error(`Failed to parse pod create response: ${out}`);
+  return {
+    id: parsed.id ?? parsed.Id ?? "",
+    name: parsed.name ?? parsed.Name ?? spec.name,
+    status: parsed.desiredStatus ?? parsed.status ?? parsed.Status ?? "PENDING",
+    costPerHr: parsed.costPerHr ?? parsed.CostPerHr,
+  };
 }
 
 export async function getPod(apiKey: string, podId: string): Promise<Pod> {
-  const data = await gql(apiKey, `
-    query GetPod($podId: String!) {
-      pod(input: { podId: $podId }) {
-        id
-        name
-        desiredStatus
-        costPerHr
-        runtime {
-          uptimeInSeconds
-          ports {
-            ip
-            isIpPublic
-            privatePort
-            publicPort
-            type
-          }
-        }
-      }
-    }
-  `, { podId });
-  const pod = data.pod as any;
-  return { ...pod, status: pod.desiredStatus ?? pod.status ?? "UNKNOWN" };
+  const out = await runpodctl(["pod", "get", podId], apiKey);
+  const parsed = tryParseJson(out.trim()) as any;
+  if (!parsed) throw new Error(`Failed to parse pod get response: ${out}`);
+  return {
+    id: parsed.id ?? parsed.Id ?? podId,
+    name: parsed.name ?? parsed.Name ?? "",
+    status: parsed.desiredStatus ?? parsed.status ?? parsed.Status ?? "UNKNOWN",
+    costPerHr: parsed.costPerHr ?? parsed.CostPerHr,
+    runtime: parsed.runtime ?? (parsed.uptimeSeconds != null ? { uptimeInSeconds: parsed.uptimeSeconds } : undefined),
+  };
 }
 
 export async function terminatePod(apiKey: string, podId: string): Promise<void> {
-  await gql(apiKey, `
-    mutation TerminatePod($input: PodTerminateInput!) {
-      podTerminate(input: $input)
-    }
-  `, { input: { podId } });
+  await runpodctl(["pod", "remove", podId], apiKey);
 }
 
 export async function listPods(apiKey: string): Promise<Pod[]> {
-  const data = await gql(apiKey, `
-    query {
-      myself {
-        pods {
-          id
-          name
-          desiredStatus
-          costPerHr
-          runtime {
-            uptimeInSeconds
-          }
-        }
-      }
-    }
-  `);
-  return ((data as any).myself.pods as any[]).map((p) => ({ ...p, status: p.desiredStatus ?? p.status ?? "UNKNOWN" }));
+  const out = await runpodctl(["pod", "list"], apiKey);
+  const parsed = tryParseJson(out.trim());
+  if (!parsed || !Array.isArray(parsed)) return [];
+  return parsed.map((p: any) => ({
+    id: p.id ?? p.Id ?? "",
+    name: p.name ?? p.Name ?? "",
+    status: p.desiredStatus ?? p.status ?? p.Status ?? "UNKNOWN",
+    costPerHr: p.costPerHr ?? p.CostPerHr,
+    runtime: p.runtime ?? (p.uptimeSeconds != null ? { uptimeInSeconds: p.uptimeSeconds } : undefined),
+  }));
 }
 
-// GPU recommendations for Kohya SDXL LoRA training
+// Fetch SSH connection info via RunPod GraphQL API (bypasses unreliable `runpodctl ssh info`).
+// Returns null if runtime ports aren't available yet.
+export async function getSshInfo(apiKey: string, podId: string): Promise<SshInfo | null> {
+  const res = await invoke<any>("fetch_pod_ssh", { apiKey, podId });
+  const ports = res?.data?.pod?.runtime?.ports as Array<{ ip: string; privatePort: number; publicPort: number }> | undefined;
+  if (!ports || ports.length === 0) return null;
+  const sshPort = ports.find(p => p.privatePort === 22);
+  if (!sshPort || !sshPort.ip || !sshPort.publicPort) return null;
+  return { host: sshPort.ip, port: sshPort.publicPort };
+}
+
+// ── SSH invoke wrappers ────────────────────────────────────────────────────────
+
+export function sshIsReady(host: string, port: number, keyPath: string): Promise<boolean> {
+  return invoke<boolean>("ssh_is_ready", { host, port, keyPath });
+}
+
+export function sshRunCommand(host: string, port: number, keyPath: string, command: string): Promise<string> {
+  return invoke<string>("run_ssh_command", { host, port, keyPath, command });
+}
+
+export function sshUploadFile(host: string, port: number, keyPath: string, localPath: string, remotePath: string): Promise<void> {
+  return invoke("ssh_upload_file", { host, port, keyPath, localPath, remotePath });
+}
+
+export function sshDownloadFile(host: string, port: number, keyPath: string, remotePath: string, localPath: string): Promise<void> {
+  return invoke("ssh_download_file", { host, port, keyPath, remotePath, localPath });
+}
+
+// ── GPU recommendations ────────────────────────────────────────────────────────
+
 // stepsPerSec: real-world throughput at 1024px SDXL (L40S confirmed at 0.4; others scaled proportionally)
+// Note: GPU IDs must match exactly what `runpodctl gpu list` returns — verify after install.
 export const RECOMMENDED_GPUS = [
   { id: "NVIDIA A100 80GB PCIe",    label: "A100 80GB",      vram: 80, stepsPerSec: 0.70 },
   { id: "NVIDIA A100-SXM4-40GB",   label: "A100 40GB",      vram: 40, stepsPerSec: 0.55 },
@@ -192,47 +220,27 @@ export interface GpuTrainingFlags {
 }
 
 // Returns optimal training flags for the available VRAM.
-// Higher VRAM → larger batch, skip gradient checkpointing, cache latents.
-// SDXL with cache_latents is memory-hungry: A100 80GB (79.25 GiB usable) fills up at batch=4;
-// batch=2 keeps it safe while still being faster than lower tiers.
-// Adaptive optimizers (Prodigy, DAdaptAdam) store many float32 state tensors per parameter
-// and use significantly more VRAM than AdamW8bit — reduce batch size one tier for them.
+// Adaptive optimizers (Prodigy, DAdaptAdam) use more VRAM — reduce batch size one tier.
 export function gpuTrainingFlags(vramGb: number, optimizer?: string): GpuTrainingFlags {
   const adaptive = optimizer === "Prodigy" || optimizer === "DAdaptAdam";
   if (vramGb >= 80) return { batchSize: adaptive ? 1 : 2, gradientCheckpointing: false, cacheLatents: true };
-  if (vramGb >= 48) return { batchSize: adaptive ? 1 : 2, gradientCheckpointing: false, cacheLatents: true };
+  if (vramGb >= 48) return { batchSize: adaptive ? 1 : 2, gradientCheckpointing: true,  cacheLatents: true };
   if (vramGb >= 40) return { batchSize: 1,                gradientCheckpointing: true,  cacheLatents: true };
   if (vramGb >= 20) return { batchSize: 1,                gradientCheckpointing: true,  cacheLatents: true };
   return                    { batchSize: 1,                gradientCheckpointing: true,  cacheLatents: false };
 }
 
-// Kohya training pod template
+// Kohya training pod template — only SSH port needed (no Jupyter)
 export const KOHYA_POD_TEMPLATE = {
   imageName: "ashleykza/kohya:25.2.1",
   containerDiskInGb: 10,
   volumeInGb: 30,
   volumeMountPath: "/workspace",
-  ports: "8888/http,7860/http,22/tcp",
+  ports: "22/tcp",
 };
 
-// Generate Kohya TOML config for SDXL LoRA
-// ── Jupyter API helpers ────────────────────────────────────────────────────────
-// All Jupyter requests go through Rust/invoke to avoid CORS issues in the webview
-
-
-export async function jupyterUploadFile(jupyterUrl: string, password: string, remotePath: string, localPath: string): Promise<void> {
-  await invoke("jupyter_upload_file", { jupyterUrl, password, remotePath, localPath });
-}
-
-export async function jupyterRunCommand(jupyterUrl: string, password: string, command: string): Promise<void> {
-  await invoke("jupyter_run_command", { jupyterUrl, password, command });
-}
-
-
 // Generates ONLY the dataset config TOML passed via --dataset_config.
-// Training hyperparameters (optimizer, network, steps, etc.) are passed as CLI
-// args by the training command — they are NOT valid keys in this file and will
-// cause a voluptuous validation error if included.
+// Training hyperparameters are passed as CLI args — not valid in this file.
 export function generateKohyaConfig(params: {
   triggerWord: string;
   datasetDir: string;

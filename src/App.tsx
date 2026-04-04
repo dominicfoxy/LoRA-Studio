@@ -15,6 +15,17 @@ import RunPodLauncher from "./pages/RunPodLauncher";
 import SettingsPage from "./pages/SettingsPage";
 import { useStore } from "./store";
 
+function StatusItem({ label, value, dim }: { label: string; value: string; dim?: boolean }) {
+  return (
+    <span style={{ fontFamily: "var(--font-mono)", fontSize: "9px", letterSpacing: "0.06em", color: dim ? "var(--text-muted)" : "var(--text-secondary)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", maxWidth: "160px" }}>
+      <span style={{ color: "var(--text-muted)", opacity: 0.6 }}>{label}: </span>{value}
+    </span>
+  );
+}
+function StatusSep() {
+  return <span style={{ color: "var(--border-light)", fontSize: "9px", userSelect: "none" }}>|</span>;
+}
+
 const NAV_ITEMS = [
   { to: "/", icon: User, label: "Character", sub: "identity & trigger" },
   { to: "/shots", icon: List, label: "Shot List", sub: "poses & outfits" },
@@ -154,7 +165,7 @@ export default function App() {
             <div style={{
               fontFamily: "var(--font-mono)",
               fontSize: "10px",
-              color: "var(--text-muted)",
+              color: "var(--text-secondary)",
               textTransform: "uppercase",
               letterSpacing: "0.1em",
             }}>Active Character</div>
@@ -168,7 +179,7 @@ export default function App() {
             <div style={{
               fontFamily: "var(--font-mono)",
               fontSize: "10px",
-              color: "var(--text-muted)",
+              color: "var(--text-secondary)",
               marginTop: "1px",
             }}>{approved} approved / {images.length} total</div>
           </div>
@@ -217,7 +228,7 @@ export default function App() {
                   <div style={{
                     fontFamily: "var(--font-mono)",
                     fontSize: "10px",
-                    color: isSafeLink ? SAFE_MUTED : "var(--text-muted)",
+                    color: isSafeLink ? SAFE_MUTED : "var(--text-secondary)",
                     letterSpacing: "0.04em",
                   }}>{sub}</div>
                 </div>
@@ -258,7 +269,7 @@ export default function App() {
           <div style={{
             fontFamily: "var(--font-mono)",
             fontSize: "9px",
-            color: ezMode ? "var(--accent-dim)" : "var(--text-muted)",
+            color: ezMode ? "var(--accent-dim)" : "var(--text-secondary)",
             letterSpacing: "0.06em",
             transition: "color 0.3s",
           }}>
@@ -278,6 +289,32 @@ export default function App() {
           <Route path="/runpod" element={<RunPodLauncher />} />
           <Route path="/settings" element={<SettingsPage />} />
         </Routes>
+        {/* Status bar */}
+        <div style={{
+          flexShrink: 0,
+          height: "22px",
+          borderTop: "1px solid var(--border)",
+          background: "var(--bg-1)",
+          display: "flex",
+          alignItems: "center",
+          padding: "0 12px",
+          gap: "16px",
+          overflow: "hidden",
+        }}>
+          <StatusItem label="char" value={character.name || "—"} />
+          <StatusSep />
+          <StatusItem label="trigger" value={character.triggerWord || "—"} />
+          <StatusSep />
+          <StatusItem label="approved" value={`${approved} / ${images.length}`} />
+          {isDirty && (
+            <>
+              <StatusSep />
+              <span style={{ fontFamily: "var(--font-mono)", fontSize: "9px", color: "var(--accent-bright)", letterSpacing: "0.08em" }}>● unsaved</span>
+            </>
+          )}
+          <div style={{ flex: 1 }} />
+          <StatusItem label="mode" value={ezMode ? "EZ" : "pro"} dim={!ezMode} />
+        </div>
       </main>
 
       {/* Unsaved changes dialog */}
@@ -306,7 +343,7 @@ export default function App() {
                 : "You have unsaved changes but no output directory is set — they cannot be saved."}
             </div>
             {saveCloseError && (
-              <div style={{ fontFamily: "var(--font-mono)", fontSize: "11px", color: "var(--red, #d47070)", marginBottom: "16px", lineHeight: 1.5 }}>
+              <div style={{ fontFamily: "var(--font-mono)", fontSize: "11px", color: "var(--red-bright)", marginBottom: "16px", lineHeight: 1.5 }}>
                 {saveCloseError}
               </div>
             )}

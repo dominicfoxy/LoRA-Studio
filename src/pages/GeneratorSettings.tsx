@@ -53,7 +53,7 @@ function SliderField({
         style={{ width: "100%", accentColor: "var(--accent)" }}
       />
       {hint && (
-        <div style={{ fontFamily: "var(--font-mono)", fontSize: "9px", color: "var(--text-muted)", marginTop: "3px" }}>
+        <div style={{ fontFamily: "var(--font-mono)", fontSize: "9px", color: "var(--text-secondary)", marginTop: "3px" }}>
           {hint}
         </div>
       )}
@@ -166,7 +166,7 @@ export default function GeneratorSettings() {
             fontFamily: "var(--font-mono)", fontSize: "11px", color: "var(--text-secondary)",
             lineHeight: 1.8,
           }}>
-            <span style={{ color: "var(--text-muted)" }}>Active config: </span>
+            <span style={{ color: "var(--text-secondary)" }}>Active config: </span>
             {generation.samplerName} · {generation.scheduler} · {generation.steps} steps · CFG {generation.cfgScale}
           </div>
 

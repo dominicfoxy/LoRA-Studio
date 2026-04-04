@@ -100,6 +100,7 @@ export interface AppSettings {
   activeTheme: string;   // built-in theme id, e.g. "default"
   themeFile: string;     // absolute path to a custom theme JSON (empty = none)
   ezMode: boolean;       // guided/beginner mode — locks technical fields, auto-applies sensible defaults
+  sshKeyPath: string;    // path to ed25519 private key registered with RunPod (~/.config/lora-studio/runpod_id_ed25519)
 }
 
 export interface ProjectState {
@@ -132,9 +133,11 @@ export interface ProjectState {
   projectLoadCount: number;
   // Active RunPod session — in-memory only (not persisted), survives page navigation
   runpodActivePodId: string;
-  runpodActiveJupyterUrl: string;
+  runpodActiveSshHost: string;
+  runpodActiveSshPort: number;
   setRunpodActivePodId: (id: string) => void;
-  setRunpodActiveJupyterUrl: (url: string) => void;
+  setRunpodActiveSshHost: (host: string) => void;
+  setRunpodActiveSshPort: (port: number) => void;
 }
 
 const defaultCharacter: CharacterConfig = {
@@ -182,6 +185,7 @@ const defaultSettings: AppSettings = {
   activeTheme: "default",
   themeFile: "",
   ezMode: false,
+  sshKeyPath: "",
 };
 
 const defaultGeneration: GenerationConfig = {
@@ -230,9 +234,11 @@ export const useStore = create<ProjectState>()(
       clearRunpodLogs: () => set({ runpodLogs: [] }),
       markSaved: () => set({ isDirty: false }),
       runpodActivePodId: "",
-      runpodActiveJupyterUrl: "",
+      runpodActiveSshHost: "",
+      runpodActiveSshPort: 0,
       setRunpodActivePodId: (id) => set({ runpodActivePodId: id }),
-      setRunpodActiveJupyterUrl: (url) => set({ runpodActiveJupyterUrl: url }),
+      setRunpodActiveSshHost: (host) => set({ runpodActiveSshHost: host }),
+      setRunpodActiveSshPort: (port) => set({ runpodActiveSshPort: port }),
 
       addImage: (img) => set((s) => ({ images: [...s.images, img] })),
       updateImage: (id, patch) =>
@@ -252,7 +258,7 @@ export const useStore = create<ProjectState>()(
     }),
     {
       name: "lora-studio-state",
-      version: 21,
+      version: 22,
       migrate: (persistedState: unknown, version: number) => {
         const state = persistedState as any;
         // v0: flat string fields on shot items
@@ -309,16 +315,6 @@ export const useStore = create<ProjectState>()(
             scheduler: state.generation?.scheduler ?? "Karras",
           };
         }
-        // v5: poses was string[] — promote to PoseEntry[]
-        if (version === 5) {
-          state.generation = {
-            ...defaultGeneration,
-            ...state.generation,
-            poses: (state.generation?.poses ?? []).map((p: unknown) =>
-              typeof p === "string" ? { prompt: p } : p
-            ),
-          };
-        }
         // v4: outfits was string[] — promote to OutfitEntry[]
         if (version === 4) {
           state.generation = {
@@ -326,6 +322,16 @@ export const useStore = create<ProjectState>()(
             ...state.generation,
             outfits: (state.generation?.outfits ?? []).map((o: unknown) =>
               typeof o === "string" ? { prompt: o } : o
+            ),
+          };
+        }
+        // v5: poses was string[] — promote to PoseEntry[]
+        if (version === 5) {
+          state.generation = {
+            ...defaultGeneration,
+            ...state.generation,
+            poses: (state.generation?.poses ?? []).map((p: unknown) =>
+              typeof p === "string" ? { prompt: p } : p
             ),
           };
         }
@@ -380,6 +386,10 @@ export const useStore = create<ProjectState>()(
         // v19→20: add ezMode
         if (version === 19) {
           state.settings = { ...defaultSettings, ...state.settings, ezMode: false };
+        }
+        // v21→22: runpodctl + SSH migration — add sshKeyPath to settings
+        if (version === 21) {
+          state.settings = { ...defaultSettings, ...state.settings, sshKeyPath: "" };
         }
         // v20→21: pin docker image — replace any kohya :latest variant with 25.2.1
         if (version === 20) {
@@ -444,6 +454,9 @@ export const useStore = create<ProjectState>()(
         if (state.settings?.ezMode === undefined) {
           state.settings = { ...defaultSettings, ...state.settings, ezMode: false };
         }
+        if (state.settings?.sshKeyPath === undefined) {
+          state.settings = { ...defaultSettings, ...state.settings, sshKeyPath: "" };
+        }
         if (state.training?.vPrediction === undefined) {
           state.training = { ...defaultTraining, ...state.training, vPrediction: false };
         }
@@ -461,6 +474,7 @@ export const useStore = create<ProjectState>()(
         training: state.training,
         images: state.images,
         settings: state.settings,
+        runpodActivePodId: state.runpodActivePodId,
       }),
     }
   )

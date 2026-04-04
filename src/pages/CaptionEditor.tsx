@@ -189,14 +189,14 @@ export default function CaptionEditor() {
             onClick={() => setTagsExpanded(!tagsExpanded)}
             style={{ display: "flex", alignItems: "center", gap: "10px", padding: "7px 28px", cursor: "pointer", userSelect: "none" }}
           >
-            <div style={{ fontFamily: "var(--font-mono)", fontSize: "10px", color: "var(--text-muted)", letterSpacing: "0.1em", textTransform: "uppercase", fontWeight: 700 }}>
+            <div style={{ fontFamily: "var(--font-mono)", fontSize: "10px", color: "var(--text-secondary)", letterSpacing: "0.1em", textTransform: "uppercase", fontWeight: 700 }}>
               Dataset Tags
             </div>
-            <div style={{ fontFamily: "var(--font-mono)", fontSize: "10px", color: "var(--text-muted)" }}>
+            <div style={{ fontFamily: "var(--font-mono)", fontSize: "10px", color: "var(--text-secondary)" }}>
               {tagFrequency.size} unique
             </div>
             {disabledTags.size > 0 && (
-              <div style={{ fontFamily: "var(--font-mono)", fontSize: "10px", color: "var(--red, #d47070)", background: "var(--red-dim)", border: "1px solid var(--red)", borderRadius: "3px", padding: "1px 8px" }}>
+              <div style={{ fontFamily: "var(--font-mono)", fontSize: "10px", color: "var(--red-bright)", background: "var(--red-dim)", border: "1px solid var(--red)", borderRadius: "3px", padding: "1px 8px" }}>
                 {disabledTags.size} tag{disabledTags.size !== 1 ? "s" : ""} will be removed on Save All
               </div>
             )}
@@ -288,7 +288,7 @@ export default function CaptionEditor() {
               padding: "20px 12px",
               fontFamily: "var(--font-mono)",
               fontSize: "10px",
-              color: "var(--text-muted)",
+              color: "var(--text-secondary)",
               textAlign: "center",
             }}>No images in this filter</div>
           )}
@@ -316,7 +316,7 @@ export default function CaptionEditor() {
             flex: 1, display: "flex", alignItems: "center",
             justifyContent: "center", flexDirection: "column", gap: "8px",
           }}>
-            <div style={{ fontFamily: "var(--font-display)", fontSize: "16px", color: "var(--text-muted)" }}>
+            <div style={{ fontFamily: "var(--font-display)", fontSize: "16px", color: "var(--text-secondary)" }}>
               Select an image to edit its caption
             </div>
           </div>
@@ -434,7 +434,7 @@ function CaptionEditorPanel({ img, triggerWord, onSave, saving, saveError }: {
               }}
               onClick={load}
             >
-              <div style={{ fontSize: "11px", fontFamily: "var(--font-mono)", color: "var(--text-muted)" }}>
+              <div style={{ fontSize: "11px", fontFamily: "var(--font-mono)", color: "var(--text-secondary)" }}>
                 Click to load image
               </div>
             </div>
@@ -444,7 +444,7 @@ function CaptionEditorPanel({ img, triggerWord, onSave, saving, saveError }: {
         <div style={{
           fontFamily: "var(--font-mono)",
           fontSize: "10px",
-          color: "var(--text-muted)",
+          color: "var(--text-secondary)",
           lineHeight: 1.5,
           padding: "8px",
           background: "var(--bg-2)",

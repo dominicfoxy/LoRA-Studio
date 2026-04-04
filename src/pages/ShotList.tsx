@@ -87,7 +87,7 @@ function CategoryPanel({
           fontFamily: "var(--font-mono)", fontSize: "10px",
           color: accentColor, textTransform: "uppercase", letterSpacing: "0.12em", fontWeight: 700,
         }}>{label}</div>
-        <div style={{ fontFamily: "var(--font-mono)", fontSize: "10px", color: "var(--text-muted)" }}>
+        <div style={{ fontFamily: "var(--font-mono)", fontSize: "10px", color: "var(--text-secondary)" }}>
           {values.length} variant{values.length !== 1 ? "s" : ""}
         </div>
         <div style={{ flex: 1 }} />
@@ -283,7 +283,7 @@ function OutfitCategoryPanel({
         <div style={{ fontFamily: "var(--font-mono)", fontSize: "12px", color: "#a0c878", textTransform: "uppercase", letterSpacing: "0.08em", fontWeight: 700 }}>
           Outfits / Clothing
         </div>
-        <div style={{ fontFamily: "var(--font-mono)", fontSize: "12px", color: "var(--text-muted)" }}>
+        <div style={{ fontFamily: "var(--font-mono)", fontSize: "12px", color: "var(--text-secondary)" }}>
           {values.length} variant{values.length !== 1 ? "s" : ""}
         </div>
         <div style={{ flex: 1 }} />
@@ -473,7 +473,7 @@ function LoraBrowser({ onInsert }: { onInsert: (tag: string) => void }) {
 
   if (!character.loraDir) {
     return (
-      <div style={{ padding: "12px", fontFamily: "var(--font-mono)", fontSize: "11px", color: "var(--text-muted)" }}>
+      <div style={{ padding: "12px", fontFamily: "var(--font-mono)", fontSize: "11px", color: "var(--text-secondary)" }}>
         Set a LoRA directory on Character Setup to browse installed LoRAs.
       </div>
     );
@@ -491,9 +491,9 @@ function LoraBrowser({ onInsert }: { onInsert: (tag: string) => void }) {
         <button className="btn-ghost" onClick={scanLoras} style={{ padding: "4px 10px", fontSize: "10px" }}>Rescan</button>
       </div>
       {!loaded
-        ? <div style={{ fontFamily: "var(--font-mono)", fontSize: "11px", color: "var(--text-muted)" }}>Scanning…</div>
+        ? <div style={{ fontFamily: "var(--font-mono)", fontSize: "11px", color: "var(--text-secondary)" }}>Scanning…</div>
         : filtered.length === 0
-          ? <div style={{ fontFamily: "var(--font-mono)", fontSize: "11px", color: "var(--text-muted)" }}>No LoRAs found</div>
+          ? <div style={{ fontFamily: "var(--font-mono)", fontSize: "11px", color: "var(--text-secondary)" }}>No LoRAs found</div>
           : groups.map(([dir, files]) => (
             <div key={dir || "__root__"}>
               {dir && (
@@ -502,7 +502,7 @@ function LoraBrowser({ onInsert }: { onInsert: (tag: string) => void }) {
                   style={{
                     padding: "4px 0", marginTop: "4px",
                     fontFamily: "var(--font-mono)", fontSize: "10px",
-                    color: "var(--text-muted)", letterSpacing: "0.08em",
+                    color: "var(--text-secondary)", letterSpacing: "0.08em",
                     cursor: "pointer", userSelect: "none",
                     display: "flex", alignItems: "center", gap: "5px",
                   }}
@@ -564,7 +564,7 @@ function SettingsPanel() {
         onClick={() => setCollapsed(!collapsed)}
         style={{ display: "flex", alignItems: "center", gap: "10px", padding: "10px 16px", cursor: "pointer", background: "var(--bg-3)", userSelect: "none" }}
       >
-        <div style={{ fontFamily: "var(--font-mono)", fontSize: "10px", color: "var(--text-muted)", textTransform: "uppercase", letterSpacing: "0.12em", fontWeight: 700 }}>Settings</div>
+        <div style={{ fontFamily: "var(--font-mono)", fontSize: "10px", color: "var(--text-secondary)", textTransform: "uppercase", letterSpacing: "0.12em", fontWeight: 700 }}>Settings</div>
         {ezMode && <div style={{ fontFamily: "var(--font-mono)", fontSize: "9px", color: "var(--accent-bright)", background: "var(--accent-glow)", border: "1px solid var(--accent-dim)", borderRadius: "3px", padding: "1px 6px", letterSpacing: "0.1em" }}>EZ</div>}
         <div style={{ flex: 1 }} />
         {collapsed ? <ChevronDown size={13} color="var(--text-muted)" /> : <ChevronUp size={13} color="var(--text-muted)" />}
@@ -600,7 +600,7 @@ function SettingsPanel() {
               <div className="section-label">Images per Combination</div>
               <input type="number" min={1} max={20} style={{ width: "70px", marginTop: "4px" }} value={generation.count} onChange={(e) => updateGeneration({ count: parseInt(e.target.value) || 1 })} />
               <div style={{ marginTop: "12px" }}>
-                <div className="section-label">Extra Tags <span style={{ color: "var(--text-muted)", fontWeight: 400 }}>(added to every prompt)</span></div>
+                <div className="section-label">Extra Tags <span style={{ color: "var(--text-secondary)", fontWeight: 400 }}>(added to every prompt)</span></div>
                 <input style={{ width: "100%", marginTop: "4px" }} placeholder="rain, umbrella, night" value={generation.extras} onChange={(e) => updateGeneration({ extras: e.target.value })} />
               </div>
             </div>
@@ -609,7 +609,7 @@ function SettingsPanel() {
           {/* Embeddings */}
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "16px", marginTop: "16px" }}>
             <div>
-              <div className="section-label">Positive Embeddings <span style={{ color: "var(--text-muted)", fontWeight: 400 }}>(added to prompt)</span></div>
+              <div className="section-label">Positive Embeddings <span style={{ color: "var(--text-secondary)", fontWeight: 400 }}>(added to prompt)</span></div>
               <div style={{ marginTop: "4px" }}>
                 <ChipInput
                   values={generation.positiveEmbeddings}
@@ -619,7 +619,7 @@ function SettingsPanel() {
               </div>
             </div>
             <div>
-              <div className="section-label">Negative Embeddings <span style={{ color: "var(--text-muted)", fontWeight: 400 }}>(added to negative prompt)</span></div>
+              <div className="section-label">Negative Embeddings <span style={{ color: "var(--text-secondary)", fontWeight: 400 }}>(added to negative prompt)</span></div>
               <div style={{ marginTop: "4px" }}>
                 <ChipInput
                   values={generation.negativeEmbeddings}
@@ -709,7 +709,7 @@ function PoseCategoryPanel({
     <div style={{ border: "1px solid var(--border)", borderRadius: "8px", marginBottom: "12px", overflow: "hidden" }}>
       <div onClick={() => setCollapsed(!collapsed)} style={{ display: "flex", alignItems: "center", gap: "10px", padding: "10px 16px", cursor: "pointer", background: "var(--bg-3)", userSelect: "none" }}>
         <div style={{ fontFamily: "var(--font-mono)", fontSize: "12px", color: "var(--accent-bright)", textTransform: "uppercase", letterSpacing: "0.08em", fontWeight: 700 }}>Poses / Framing</div>
-        <div style={{ fontFamily: "var(--font-mono)", fontSize: "12px", color: "var(--text-muted)" }}>{values.length} variant{values.length !== 1 ? "s" : ""}</div>
+        <div style={{ fontFamily: "var(--font-mono)", fontSize: "12px", color: "var(--text-secondary)" }}>{values.length} variant{values.length !== 1 ? "s" : ""}</div>
         <div style={{ flex: 1 }} />
         {collapsed ? <ChevronDown size={13} color="var(--text-muted)" /> : <ChevronUp size={13} color="var(--text-muted)" />}
       </div>
@@ -781,7 +781,7 @@ function DynamicPromptsPanel({
         onClick={() => setOpen(!open)}
         style={{ display: "flex", alignItems: "center", gap: "10px", padding: "10px 16px", cursor: "pointer", background: "var(--bg-3)", userSelect: "none" }}
       >
-        <div style={{ fontFamily: "var(--font-mono)", fontSize: "10px", color: "var(--text-muted)", textTransform: "uppercase", letterSpacing: "0.12em", fontWeight: 700 }}>
+        <div style={{ fontFamily: "var(--font-mono)", fontSize: "10px", color: "var(--text-secondary)", textTransform: "uppercase", letterSpacing: "0.12em", fontWeight: 700 }}>
           Dynamic Prompts Export
         </div>
         <div style={{ flex: 1 }} />
@@ -913,7 +913,7 @@ export default function ShotList() {
         title="Shot List"
         subtitle="Define variants per category — the generator produces all combinations"
         actions={
-          <div style={{ fontFamily: "var(--font-mono)", fontSize: "11px", color: "var(--text-muted)", padding: "6px 12px", background: "var(--bg-3)", borderRadius: "4px", border: "1px solid var(--border)" }}>
+          <div style={{ fontFamily: "var(--font-mono)", fontSize: "11px", color: "var(--text-secondary)", padding: "6px 12px", background: "var(--bg-3)", borderRadius: "4px", border: "1px solid var(--border)" }}>
             {permCount} combo{permCount !== 1 ? "s" : ""} × {generation.count} = {totalImages} images planned
           </div>
         }
@@ -974,10 +974,10 @@ export default function ShotList() {
         <div style={{ padding: "12px 14px", background: "var(--bg-2)", border: "1px solid var(--border)", borderRadius: "8px" }}>
           <div className="section-label" style={{ display: "flex", justifyContent: "space-between" }}>
             <span>Prompt Preview</span>
-            {permCount > 1 && <span style={{ color: "var(--text-muted)", fontWeight: 400 }}>showing combo 1 of {permCount}</span>}
+            {permCount > 1 && <span style={{ color: "var(--text-secondary)", fontWeight: 400 }}>showing combo 1 of {permCount}</span>}
           </div>
           <div style={{ fontFamily: "var(--font-mono)", fontSize: "11px", color: "var(--accent-bright)", lineHeight: 1.6, marginTop: "6px", wordBreak: "break-word" }}>
-            {previewPrompt || <span style={{ color: "var(--text-muted)" }}>Add variants above to see a preview…</span>}
+            {previewPrompt || <span style={{ color: "var(--text-secondary)" }}>Add variants above to see a preview…</span>}
           </div>
         </div>
 

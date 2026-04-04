@@ -7,7 +7,7 @@ import { useStore, GeneratedImage } from "../store";
 const Field = ({ label, hint, children }: { label: string; hint?: string; children: React.ReactNode }) => (
   <div style={{ marginBottom: "20px" }}>
     <div className="section-label">{label}</div>
-    {hint && <div style={{ fontFamily: "var(--font-body)", fontStyle: "italic", fontSize: "14px", color: "var(--text-muted)", marginBottom: "6px" }}>{hint}</div>}
+    {hint && <div style={{ fontFamily: "var(--font-body)", fontStyle: "italic", fontSize: "14px", color: "var(--text-secondary)", marginBottom: "6px" }}>{hint}</div>}
     {children}
   </div>
 );
@@ -82,7 +82,7 @@ function ModelPicker({ models, value, onChange, onClear }: {
             </div>
             <div style={{ maxHeight: "260px", overflowY: "auto" }}>
               {filtered.length === 0
-                ? <div style={{ padding: "8px 12px", fontFamily: "var(--font-mono)", fontSize: "11px", color: "var(--text-muted)" }}>No matches</div>
+                ? <div style={{ padding: "8px 12px", fontFamily: "var(--font-mono)", fontSize: "11px", color: "var(--text-secondary)" }}>No matches</div>
                 : filtered.map((m) => (
                   <div
                     key={m}
@@ -313,7 +313,7 @@ export default function CharacterSetup() {
       />
       {confirmNew && (
         <div style={{ padding: "10px 28px", background: "rgba(154,74,74,0.12)", borderBottom: "1px solid var(--red)", flexShrink: 0, display: "flex", alignItems: "center", gap: "16px" }}>
-          <span style={{ fontFamily: "var(--font-mono)", fontSize: "11px", color: "#d47070", flex: 1 }}>
+          <span style={{ fontFamily: "var(--font-mono)", fontSize: "11px", color: "var(--red-bright)", flex: 1 }}>
             This will clear all character fields, shot list, and images. Checkpoint, LoRA directory, and sampler settings will be kept.
           </span>
           <button onClick={newCharacter} style={{ padding: "5px 14px", fontSize: "11px", cursor: "pointer", background: "var(--red)", border: "none", color: "white", borderRadius: "4px", fontFamily: "var(--font-display)", fontWeight: 700, letterSpacing: "0.05em", textTransform: "uppercase", flexShrink: 0 }}>
@@ -411,7 +411,7 @@ export default function CharacterSetup() {
                 )}
               </div>
               {modelError && (
-                <div style={{ fontFamily: "var(--font-mono)", fontSize: "10px", color: "#d47070", marginTop: "5px" }}>
+                <div style={{ fontFamily: "var(--font-mono)", fontSize: "10px", color: "var(--red-bright)", marginTop: "5px" }}>
                   {modelError}
                 </div>
               )}
@@ -452,7 +452,7 @@ export default function CharacterSetup() {
           {(settings.recentProjects ?? []).length > 0 && (
             <div style={{ gridColumn: "1 / -1", marginTop: "8px" }}>
               <div style={{ display: "flex", alignItems: "center", gap: "8px", marginBottom: "10px" }}>
-                <Clock size={12} color="var(--text-muted)" />
+                <Clock size={12} color="var(--text-secondary)" />
                 <div className="section-label" style={{ margin: 0 }}>Recent Characters</div>
               </div>
               <div style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
@@ -471,7 +471,7 @@ export default function CharacterSetup() {
                       <div style={{ fontFamily: "var(--font-display)", fontSize: "13px", fontWeight: 700, color: r.outputDir === character.outputDir ? "var(--accent-bright)" : "var(--text-primary)" }}>
                         {r.name || "Unnamed"}
                       </div>
-                      <div style={{ fontFamily: "var(--font-mono)", fontSize: "10px", color: "var(--text-muted)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", marginTop: "2px" }}>
+                      <div style={{ fontFamily: "var(--font-mono)", fontSize: "10px", color: "var(--text-secondary)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", marginTop: "2px" }}>
                         {r.outputDir}
                       </div>
                     </div>

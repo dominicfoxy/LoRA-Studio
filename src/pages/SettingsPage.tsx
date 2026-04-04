@@ -117,7 +117,7 @@ export default function SettingsPage() {
                     </button>
                   )}
                 </div>
-                <div style={{ fontFamily: "var(--font-body)", fontStyle: "italic", fontSize: "11px", color: "var(--text-muted)", marginTop: "4px" }}>
+                <div style={{ fontFamily: "var(--font-body)", fontStyle: "italic", fontSize: "11px", color: "var(--text-secondary)", marginTop: "4px" }}>
                   JSON object of CSS variable overrides, e.g. {"{"}"--accent": "#ff6600"{"}"}. Layered on top of the selected theme.
                 </div>
               </div>
@@ -173,7 +173,7 @@ export default function SettingsPage() {
                   {forgeTest === "fail" && <span style={{ fontFamily: "var(--font-mono)", fontSize: "10px", color: "var(--red)", marginLeft: "4px" }}>failed</span>}
                 </div>
               </div>
-              <div style={{ fontFamily: "var(--font-body)", fontStyle: "italic", fontSize: "11px", color: "var(--text-muted)", marginTop: "4px" }}>
+              <div style={{ fontFamily: "var(--font-body)", fontStyle: "italic", fontSize: "11px", color: "var(--text-secondary)", marginTop: "4px" }}>
                 Make sure Forge is running with --api flag enabled
               </div>
             </div>
@@ -232,7 +232,7 @@ export default function SettingsPage() {
                   {runpodTest === "fail" && <span style={{ fontFamily: "var(--font-mono)", fontSize: "10px", color: "var(--red)", marginLeft: "4px" }}>invalid</span>}
                 </div>
               </div>
-              <div style={{ fontFamily: "var(--font-body)", fontStyle: "italic", fontSize: "11px", color: "var(--text-muted)", marginTop: "4px" }}>
+              <div style={{ fontFamily: "var(--font-body)", fontStyle: "italic", fontSize: "11px", color: "var(--text-secondary)", marginTop: "4px" }}>
                 Get your API key at runpod.io/console/user/settings
               </div>
             </div>
@@ -245,7 +245,7 @@ export default function SettingsPage() {
                 onChange={(e) => setSettings({ dockerImage: e.target.value })}
                 placeholder="ashleykza/kohya:25.2.1"
               />
-              <div style={{ fontFamily: "var(--font-body)", fontStyle: "italic", fontSize: "11px", color: "var(--text-muted)", marginTop: "4px" }}>
+              <div style={{ fontFamily: "var(--font-body)", fontStyle: "italic", fontSize: "11px", color: "var(--text-secondary)", marginTop: "4px" }}>
                 Pinned to a specific tag — change only when you want to deliberately upgrade
               </div>
             </div>
@@ -298,7 +298,7 @@ export default function SettingsPage() {
               <p style={{ margin: "0 0 10px" }}>
                 This software is provided as-is, without warranty of any kind. You are solely responsible for the content you generate, the models you train, and how those models are used. Ensure your use complies with the terms of service of any third-party services (RunPod, image generation APIs, model licences, etc.) and applicable law.
               </p>
-              <p style={{ margin: 0, color: "var(--text-muted)", fontSize: "11px" }}>
+              <p style={{ margin: 0, color: "var(--text-secondary)", fontSize: "11px" }}>
                 Licensed under the PolyForm Noncommercial License 1.0.0 — non-commercial use only.
               </p>
             </div>

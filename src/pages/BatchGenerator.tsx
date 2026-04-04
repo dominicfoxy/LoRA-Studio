@@ -115,8 +115,8 @@ function PreviewPane({ img, onApprove, onReject, onDelete, onLightbox }: {
   if (!img) {
     return (
       <div style={{ display: "flex", alignItems: "center", justifyContent: "center", height: "100%", flexDirection: "column", gap: "10px" }}>
-        <ZoomIn size={28} color="var(--text-muted)" strokeWidth={1} />
-        <div style={{ fontFamily: "var(--font-mono)", fontSize: "10px", color: "var(--text-muted)" }}>click an image to preview</div>
+        <ZoomIn size={28} color="var(--text-secondary)" strokeWidth={1} />
+        <div style={{ fontFamily: "var(--font-mono)", fontSize: "10px", color: "var(--text-secondary)" }}>click an image to preview</div>
       </div>
     );
   }
@@ -155,7 +155,7 @@ function PreviewPane({ img, onApprove, onReject, onDelete, onLightbox }: {
       </div>
 
       {/* Caption */}
-      <div style={{ padding: "10px 14px", fontFamily: "var(--font-mono)", fontSize: "10px", color: "var(--text-muted)", lineHeight: 1.55, maxHeight: "90px", overflowY: "auto", borderTop: "1px solid var(--border)", flexShrink: 0 }}>
+      <div style={{ padding: "10px 14px", fontFamily: "var(--font-mono)", fontSize: "10px", color: "var(--text-secondary)", lineHeight: 1.55, maxHeight: "90px", overflowY: "auto", borderTop: "1px solid var(--border)", flexShrink: 0 }}>
         {img.caption || <span style={{ opacity: 0.5 }}>no caption</span>}
       </div>
 
@@ -165,7 +165,7 @@ function PreviewPane({ img, onApprove, onReject, onDelete, onLightbox }: {
       {/* Buttons */}
       <div style={{ padding: "10px 14px", display: "flex", gap: "8px", borderTop: "1px solid var(--border)", flexShrink: 0 }}>
         <button onClick={onApprove} style={{ flex: 1, padding: "8px", fontSize: "13px", background: img.approved === true ? "var(--green)" : "var(--green-dim)", border: `1px solid var(--green)`, color: img.approved === true ? "white" : "var(--green)", borderRadius: "4px", cursor: "pointer", fontFamily: "var(--font-display)", fontWeight: 700, letterSpacing: "0.05em" }}>✓ Approve</button>
-        <button onClick={onReject} style={{ flex: 1, padding: "8px", fontSize: "13px", background: img.approved === false ? "var(--red)" : "var(--red-dim)", border: `1px solid var(--red)`, color: img.approved === false ? "white" : "#d47070", borderRadius: "4px", cursor: "pointer", fontFamily: "var(--font-display)", fontWeight: 700, letterSpacing: "0.05em" }}>✗ Reject</button>
+        <button onClick={onReject} style={{ flex: 1, padding: "8px", fontSize: "13px", background: img.approved === false ? "var(--red)" : "var(--red-dim)", border: `1px solid var(--red)`, color: img.approved === false ? "white" : "var(--red-bright)", borderRadius: "4px", cursor: "pointer", fontFamily: "var(--font-display)", fontWeight: 700, letterSpacing: "0.05em" }}>✗ Reject</button>
         <button onClick={handleDelete} disabled={deleting} style={{ padding: "8px 10px", fontSize: "13px", background: "var(--bg-3)", border: "1px solid var(--border)", color: "var(--text-muted)", borderRadius: "4px", cursor: "pointer" }} title="Delete from disk">
           <Trash2 size={13} />
         </button>
@@ -257,7 +257,7 @@ function ImageCard({ img, selected, focused, onSelect, onFocus, onApprove, onRej
       {/* Actions */}
       <div style={{ padding: "8px", display: "flex", gap: "6px" }}>
         <button onClick={onApprove} style={{ flex: 1, padding: "5px", fontSize: "11px", background: img.approved === true ? "var(--green)" : "var(--green-dim)", border: `1px solid var(--green)`, color: img.approved === true ? "white" : "var(--green)", borderRadius: "4px", cursor: "pointer", fontFamily: "var(--font-display)", fontWeight: 600, letterSpacing: "0.05em", textTransform: "uppercase" }}>✓</button>
-        <button onClick={onReject} style={{ flex: 1, padding: "5px", fontSize: "11px", background: img.approved === false ? "var(--red)" : "var(--red-dim)", border: `1px solid var(--red)`, color: img.approved === false ? "white" : "#d47070", borderRadius: "4px", cursor: "pointer", fontFamily: "var(--font-display)", fontWeight: 600, letterSpacing: "0.05em", textTransform: "uppercase" }}>✗</button>
+        <button onClick={onReject} style={{ flex: 1, padding: "5px", fontSize: "11px", background: img.approved === false ? "var(--red)" : "var(--red-dim)", border: `1px solid var(--red)`, color: img.approved === false ? "white" : "var(--red-bright)", borderRadius: "4px", cursor: "pointer", fontFamily: "var(--font-display)", fontWeight: 600, letterSpacing: "0.05em", textTransform: "uppercase" }}>✗</button>
         <button onClick={handleDelete} disabled={deleting} style={{ padding: "5px 7px", fontSize: "11px", background: "var(--bg-3)", border: "1px solid var(--border)", color: "var(--text-muted)", borderRadius: "4px", cursor: "pointer" }} title="Delete from disk">
           <Trash2 size={11} />
         </button>
@@ -539,7 +539,7 @@ export default function BatchGenerator() {
           <div style={{ display: "flex", gap: "8px", alignItems: "center" }}>
             {/* Thumbnail size slider */}
             <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
-              <span style={{ fontFamily: "var(--font-mono)", fontSize: "9px", color: "var(--text-muted)", letterSpacing: "0.08em" }}>SIZE</span>
+              <span style={{ fontFamily: "var(--font-mono)", fontSize: "9px", color: "var(--text-secondary)", letterSpacing: "0.08em" }}>SIZE</span>
               <input type="range" min={160} max={400} step={20} value={thumbSize}
                 onChange={(e) => setThumbSize(parseInt(e.target.value))}
                 style={{ width: "80px", accentColor: "var(--accent)" }} />
@@ -648,9 +648,9 @@ export default function BatchGenerator() {
       )}
 
       {lastError && (
-        <div style={{ padding: "8px 28px", background: "var(--red-dim)", borderBottom: "1px solid var(--red)", fontFamily: "var(--font-mono)", fontSize: "11px", color: "#d47070", flexShrink: 0, display: "flex", justifyContent: "space-between" }}>
+        <div style={{ padding: "8px 28px", background: "var(--red-dim)", borderBottom: "1px solid var(--red)", fontFamily: "var(--font-mono)", fontSize: "11px", color: "var(--red-bright)", flexShrink: 0, display: "flex", justifyContent: "space-between" }}>
           <span>{lastError}</span>
-          <button onClick={() => setLastError("")} style={{ background: "none", border: "none", color: "#d47070", cursor: "pointer", fontSize: "14px", padding: 0 }}>×</button>
+          <button onClick={() => setLastError("")} style={{ background: "none", border: "none", color: "var(--red-bright)", cursor: "pointer", fontSize: "14px", padding: 0 }}>×</button>
         </div>
       )}
 
@@ -702,7 +702,7 @@ export default function BatchGenerator() {
 
       {confirmPurge && (
         <div style={{ padding: "10px 28px", background: "rgba(154,74,74,0.12)", borderBottom: "1px solid var(--red)", flexShrink: 0, display: "flex", alignItems: "center", gap: "16px" }}>
-          <span style={{ fontFamily: "var(--font-mono)", fontSize: "11px", color: "#d47070", flex: 1 }}>
+          <span style={{ fontFamily: "var(--font-mono)", fontSize: "11px", color: "var(--red-bright)", flex: 1 }}>
             This will permanently delete all images and caption files from the output directory — including any not tracked in this session. This cannot be undone.
           </span>
           <button onClick={purgeAll} style={{
@@ -722,10 +722,10 @@ export default function BatchGenerator() {
 
       {purgeFailCount > 0 && (
         <div style={{ padding: "6px 20px", background: "rgba(154,74,74,0.12)", borderBottom: "1px solid var(--red)", display: "flex", alignItems: "center", gap: "12px", flexShrink: 0 }}>
-          <span style={{ fontFamily: "var(--font-mono)", fontSize: "11px", color: "#d47070", flex: 1 }}>
+          <span style={{ fontFamily: "var(--font-mono)", fontSize: "11px", color: "var(--red-bright)", flex: 1 }}>
             {purgeFailCount} file{purgeFailCount > 1 ? "s" : ""} could not be deleted from disk — they may have already been removed.
           </span>
-          <button onClick={() => setPurgeFailCount(0)} style={{ padding: "2px 8px", fontSize: "10px", cursor: "pointer", background: "transparent", border: "1px solid var(--red)", color: "#d47070", borderRadius: "4px", fontFamily: "var(--font-display)" }}>Dismiss</button>
+          <button onClick={() => setPurgeFailCount(0)} style={{ padding: "2px 8px", fontSize: "10px", cursor: "pointer", background: "transparent", border: "1px solid var(--red)", color: "var(--red-bright)", borderRadius: "4px", fontFamily: "var(--font-display)" }}>Dismiss</button>
         </div>
       )}
 
@@ -738,7 +738,7 @@ export default function BatchGenerator() {
         ].map(({ label, value, color }) => (
           <div key={label} style={{ flex: 1, padding: "10px 20px", background: "var(--bg-2)", textAlign: "center" }}>
             <div style={{ fontFamily: "var(--font-display)", fontSize: "24px", fontWeight: 800, color }}>{value}</div>
-            <div style={{ fontFamily: "var(--font-mono)", fontSize: "9px", color: "var(--text-muted)", letterSpacing: "0.1em", textTransform: "uppercase" }}>{label}</div>
+            <div style={{ fontFamily: "var(--font-mono)", fontSize: "9px", color: "var(--text-secondary)", letterSpacing: "0.1em", textTransform: "uppercase" }}>{label}</div>
           </div>
         ))}
       </div>
@@ -748,9 +748,9 @@ export default function BatchGenerator() {
         {/* Pending + rejected grid */}
         {[...pending, ...rejected].length === 0 && approved.length === 0 ? (
           <div style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", height: "300px", gap: "12px" }}>
-            <Zap size={32} color="var(--text-muted)" strokeWidth={1} />
-            <div style={{ fontFamily: "var(--font-display)", fontSize: "16px", color: "var(--text-muted)" }}>No images generated yet</div>
-            <div style={{ fontFamily: "var(--font-body)", fontStyle: "italic", fontSize: "13px", color: "var(--text-muted)" }}>Add variants on the Shot List page, then hit Generate</div>
+            <Zap size={32} color="var(--text-secondary)" strokeWidth={1} />
+            <div style={{ fontFamily: "var(--font-display)", fontSize: "16px", color: "var(--text-secondary)" }}>No images generated yet</div>
+            <div style={{ fontFamily: "var(--font-body)", fontStyle: "italic", fontSize: "13px", color: "var(--text-secondary)" }}>Add variants on the Shot List page, then hit Generate</div>
           </div>
         ) : (
           <>
@@ -801,7 +801,7 @@ export default function BatchGenerator() {
                   <span style={{ fontFamily: "var(--font-mono)", fontSize: "11px", color: "var(--green)", fontWeight: 700 }}>
                     {approved.length} Approved
                   </span>
-                  <span style={{ fontFamily: "var(--font-mono)", fontSize: "10px", color: "var(--text-muted)", flex: 1 }}>
+                  <span style={{ fontFamily: "var(--font-mono)", fontSize: "10px", color: "var(--text-secondary)", flex: 1 }}>
                     — ready for captioning
                   </span>
                   {approvedExpanded

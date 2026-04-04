@@ -5,10 +5,11 @@ import { Upload, Play, Square, RefreshCw, Terminal, AlertTriangle, ExternalLink,
 import PageHeader from "../components/PageHeader";
 import { useStore } from "../store";
 import {
-  listGpuTypes, createPod, getPod, terminatePod, listPods,
-  listNetworkVolumes, jupyterUploadFile, jupyterRunCommand,
+  listGpuTypes, fetchGpuPrices, createPod, getPod, terminatePod, listPods, getSshInfo,
+  listNetworkVolumes, checkRunpodctl, installRunpodctl, setupSshKey,
+  sshIsReady, sshRunCommand, sshUploadFile, sshDownloadFile,
   RECOMMENDED_GPUS, KOHYA_POD_TEMPLATE, generateKohyaConfig, gpuTrainingFlags,
-  Pod, NetworkVolume,
+  Pod, NetworkVolume, GpuPrice,
 } from "../lib/runpod";
 
 interface SearchResult {
@@ -22,7 +23,7 @@ interface SearchResult {
 type Phase = "config" | "packaging" | "uploading" | "training" | "done";
 
 function logColor(line: string): string {
-  if (/error|traceback|exception|failed|failure|abort/i.test(line)) return "#d47070";
+  if (/error|traceback|exception|failed|failure|abort/i.test(line)) return "var(--red-bright)";
   if (/warning|warn:|extracting/i.test(line)) return "#d4a04a";
   if (/saved|complete|finished|terminated|downloaded|uploaded|extracted|success|done\b|all done|zipped|created|linked|✓/i.test(line)) return "#6abf8a";
   if (/step \d+\/\d+|uploading|launching|packaging|downloading|training|epoch \d+|waiting|it\/s|s\/it/i.test(line)) return "var(--accent-bright)";
@@ -38,11 +39,13 @@ function sanitizeShellArg(s: string): string {
 // Module-level state — survives HMR remounts (React Fast Refresh doesn't re-run module scope)
 let _podPollId: ReturnType<typeof setInterval> | null = null;
 let _logPollId: ReturnType<typeof setInterval> | null = null;
-let _jupyterWaitId: ReturnType<typeof setInterval> | null = null;
+let _sshWaitId: ReturnType<typeof setInterval> | null = null;
 let _uploadInProgress = false;
+// Track which pod we've already reconnected to — prevents re-running reconnect on tab switches
+let _connectedPodId = "";
 
 export default function RunPodLauncher() {
-  const { character, images, settings, setSettings, training: config, updateTraining: setConfig, runpodLogs: logs, addRunpodLog, clearRunpodLogs, runpodActivePodId, runpodActiveJupyterUrl, setRunpodActivePodId, setRunpodActiveJupyterUrl } = useStore();
+  const { character, images, settings, setSettings, training: config, updateTraining: setConfig, runpodLogs: logs, addRunpodLog, clearRunpodLogs, runpodActivePodId, runpodActiveSshHost, runpodActiveSshPort, setRunpodActivePodId, setRunpodActiveSshHost, setRunpodActiveSshPort } = useStore();
   const [phase, setPhase] = useState<Phase>(runpodActivePodId ? "training" : "config");
   const [pipelineStep, setPipelineStep] = useState(runpodActivePodId ? 0 : -1);
   const [pod, setPodLocal] = useState<Pod | null>(null);
@@ -53,11 +56,17 @@ export default function RunPodLauncher() {
   const [activePods, setActivePods] = useState<Pod[]>([]);
   const [polling, setPolling] = useState(false);
   const [confirmLowImages, setConfirmLowImages] = useState(false);
-  const [jupyterUrl, setJupyterUrlLocal] = useState<string | null>(runpodActiveJupyterUrl || null);
-  const setJupyterUrl = (url: string | null) => { setJupyterUrlLocal(url); setRunpodActiveJupyterUrl(url ?? ""); };
-  const [livePrices, setLivePrices] = useState<Record<string, { secure: number; community: number }> | null>(null);
-  const [liveGpuTypes, setLiveGpuTypes] = useState<Array<{ id: string; displayName: string; memoryInGb: number; secureCloud: boolean; communityCloud: boolean }> | null>(null);
+  const [sshHost, setSshHostLocal] = useState(runpodActiveSshHost || "");
+  const [sshPort, setSshPortLocal] = useState(runpodActiveSshPort || 0);
+  const setSshInfo = (host: string, port: number) => {
+    setSshHostLocal(host); setSshPortLocal(port);
+    setRunpodActiveSshHost(host); setRunpodActiveSshPort(port);
+  };
+  const [liveGpuTypes, setLiveGpuTypes] = useState<Array<{ id: string; displayName: string; memoryInGb: number }> | null>(null);
+  const [livePrices, setLivePrices] = useState<Map<string, GpuPrice> | null>(null);
   const [fetchingPrices, setFetchingPrices] = useState(false);
+  const [runpodctlStatus, setRunpodctlStatus] = useState<"checking" | "missing" | "installing" | "ready">("checking");
+  const [sshKeyState, setSshKeyState] = useState<"idle" | "working" | "done" | "error">("idle");
   const [networkVolumes, setNetworkVolumes] = useState<NetworkVolume[]>([]);
   const [fetchingVolumes, setFetchingVolumes] = useState(false);
   const [uploadStatus, setUploadStatus] = useState<string | null>(null);
@@ -81,27 +90,67 @@ export default function RunPodLauncher() {
   const [modelLoading, setModelLoading] = useState(false);
   const [modelOpen, setModelOpen] = useState(false);
   const [modelSelected, setModelSelected] = useState("");
+  const [podUptimeSec, setPodUptimeSec] = useState<number | null>(null);
+  const podUptimeRef = useRef<number | null>(null);
+  const uptimeIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const [logCopied, setLogCopied] = useState(false);
   const [commandCopied, setCommandCopied] = useState(false);
   const [autoScroll, setAutoScroll] = useState(true);
   const logScrollRef = useRef<HTMLDivElement>(null);
-  // GPU IDs available in the selected volume's specific datacenter (for cache-hit detection)
-  const [dcGpuIds, setDcGpuIds] = useState<Set<string>>(new Set());
   // Effective volume ID for the current training run (null when GPU is outside volume's DC)
   const effectiveVolumeIdRef = useRef<string | null>(null);
+  // When true, poll tick uses checkAndResume instead of uploadToVolume after SSH ready
+  const linkedPodRef = useRef(false);
   const [downloadIntermediates, setDownloadIntermediates] = useState(false);
   const downloadIntermediatesRef = useRef(false);
   useEffect(() => { downloadIntermediatesRef.current = downloadIntermediates; }, [downloadIntermediates]);
   const [autoTerminate, setAutoTerminate] = useState(true);
   const autoTerminateRef = useRef(true);
   useEffect(() => { autoTerminateRef.current = autoTerminate; }, [autoTerminate]);
+  // Sync uptime ref from poll data (runs each time pod object updates)
+  const podStatus = pod?.status;
+  const polledUptime = pod?.runtime?.uptimeInSeconds;
+  useEffect(() => {
+    if (podStatus === "RUNNING") {
+      if (polledUptime != null && polledUptime > 0) {
+        podUptimeRef.current = polledUptime;
+        setPodUptimeSec(polledUptime);
+      } else if (podUptimeRef.current == null) {
+        podUptimeRef.current = 0;
+        setPodUptimeSec(0);
+      }
+    } else {
+      podUptimeRef.current = null;
+      setPodUptimeSec(null);
+    }
+  }, [podStatus, polledUptime]);
+
+  // Tick uptime every second while pod is running (interval lifecycle separate from poll sync)
+  useEffect(() => {
+    if (podStatus !== "RUNNING") {
+      if (uptimeIntervalRef.current) { clearInterval(uptimeIntervalRef.current); uptimeIntervalRef.current = null; }
+      return;
+    }
+    uptimeIntervalRef.current = setInterval(() => {
+      podUptimeRef.current = (podUptimeRef.current ?? 0) + 1;
+      setPodUptimeSec(podUptimeRef.current);
+    }, 1000);
+    return () => { if (uptimeIntervalRef.current) { clearInterval(uptimeIntervalRef.current); uptimeIntervalRef.current = null; } };
+  }, [podStatus]);
+
+  // Check runpodctl availability on mount
+  useEffect(() => {
+    checkRunpodctl().then(ready => setRunpodctlStatus(ready ? "ready" : "missing"));
+  }, []);
+
   // Clear all intervals on unmount to prevent accumulation across navigations
   useEffect(() => {
     return () => {
       if (_podPollId) { clearInterval(_podPollId); _podPollId = null; }
       if (_logPollId) { clearInterval(_logPollId); _logPollId = null; }
-      if (_jupyterWaitId) { clearInterval(_jupyterWaitId); _jupyterWaitId = null; }
+      if (_sshWaitId) { clearInterval(_sshWaitId); _sshWaitId = null; }
       _uploadInProgress = false;
+      _connectedPodId = ""; // allow reconnect to re-fire on remount
     };
   }, []);
 
@@ -146,8 +195,7 @@ export default function RunPodLauncher() {
   }, [hasApiKey]);
 
   // Check pod state on reconnect — skip re-uploading files already present and stable
-  const checkAndResume = async (jUrl: string) => {
-    const JUPYTER_PASS = "lorastudio";
+  const checkAndResume = async (host: string, port: number, keyPath: string) => {
     const zipName = `${character.triggerWord}_dataset.zip`;
     const modelBaseName = sanitizeShellArg(
       (character.baseModel || "model.safetensors").replace(/\s*\[.*?\]\s*$/, "").trim().split(/[\\/]/).pop() || "model.safetensors"
@@ -158,123 +206,122 @@ export default function RunPodLauncher() {
 
     try {
       const [extractResult, manifestResult] = await Promise.allSettled([
-        invoke<string>("jupyter_read_file", { jupyterUrl: jUrl, password: JUPYTER_PASS, remotePath: "workspace/.extract_done" }),
-        invoke<string>("jupyter_read_file", { jupyterUrl: jUrl, password: JUPYTER_PASS, remotePath: "workspace/.model_manifest" }),
+        sshRunCommand(host, port, keyPath, "test -f /workspace/.extract_done && echo yes || echo no"),
+        sshRunCommand(host, port, keyPath, "cat /workspace/.model_manifest 2>/dev/null || echo ''"),
       ]);
 
-      const datasetReady = extractResult.status === "fulfilled";
-      const modelReady = manifestResult.status === "fulfilled";
+      const datasetReady = extractResult.status === "fulfilled" && (extractResult.value as string).trim() === "yes";
+      const modelReady = manifestResult.status === "fulfilled" && !!(manifestResult.value as string).trim();
 
       if (datasetReady && modelReady) {
-        // Use .training_done sentinel (written only on clean exit) — not output files,
-        // which include intermediates and would trigger a false download mid-training.
-        const trainingDone = await invoke<string>("jupyter_read_file", { jupyterUrl: jUrl, password: JUPYTER_PASS, remotePath: "workspace/.training_done" }).catch(() => null);
-        if (trainingDone !== null) {
+        const trainingDone = await sshRunCommand(host, port, keyPath, "test -f /workspace/.training_done && echo yes || echo no").catch(() => "no");
+        if (trainingDone.trim() === "yes") {
           log("Training already completed — downloading instead of relaunching…");
           setPipelineStep(3);
           setUploadStatus(null);
-          await downloadOutputs(jUrl);
+          await downloadOutputs(host, port, keyPath);
           return;
         }
-        // Training not complete — resume log polling; it will detect completion or failure
+        // Check if training previously failed (log exists with failure marker but no .training_done)
+        const logTail = await sshRunCommand(host, port, keyPath, "tail -5 /workspace/training.log 2>/dev/null || echo ''").catch(() => "");
+        if (/training failed/i.test(logTail)) {
+          log("Previous training failed — relaunching with current settings…");
+          setUploadStatus(null);
+          const vram = RECOMMENDED_GPUS.find(g => g.id === config.gpuTypeId)?.vram ?? 0;
+          const gpuFlags = gpuTrainingFlags(vram, config.optimizer);
+          launchTraining(host, port, keyPath, modelBaseName, gpuFlags);
+          return;
+        }
         log("Dataset and model on pod, training not yet complete — resuming log monitor…");
         setPipelineStep(3);
         setUploadStatus(null);
-        startLogPolling(jUrl, 0);
+        startLogPolling(host, port, keyPath, 0);
         return;
       }
 
       if (!datasetReady) {
-        // Check if the zip is on the pod and not mid-transfer (size stable over ~10s)
+        // Check if zip is present and stable (size unchanged over ~10s)
         log("Dataset not yet extracted — checking zip status…");
-        await jupyterRunCommand(jUrl, JUPYTER_PASS, `stat -c%s /workspace/${zipName} 2>/dev/null > /workspace/.zipsize.txt`);
-        await new Promise(r => setTimeout(r, 5000));
-        const size1 = (await invoke<string>("jupyter_read_file", { jupyterUrl: jUrl, password: JUPYTER_PASS, remotePath: "workspace/.zipsize.txt" }).catch(() => "")).trim();
-
+        const size1 = (await sshRunCommand(host, port, keyPath, `stat -c%s /workspace/${zipName} 2>/dev/null || echo 0`).catch(() => "0")).trim();
         if (size1 && size1 !== "0") {
-          await new Promise(r => setTimeout(r, 6000));
-          await jupyterRunCommand(jUrl, JUPYTER_PASS, `stat -c%s /workspace/${zipName} 2>/dev/null > /workspace/.zipsize.txt`);
-          await new Promise(r => setTimeout(r, 5000));
-          const size2 = (await invoke<string>("jupyter_read_file", { jupyterUrl: jUrl, password: JUPYTER_PASS, remotePath: "workspace/.zipsize.txt" }).catch(() => "")).trim();
-
+          await new Promise(r => setTimeout(r, 10000));
+          const size2 = (await sshRunCommand(host, port, keyPath, `stat -c%s /workspace/${zipName} 2>/dev/null || echo 0`).catch(() => "0")).trim();
           if (size1 !== size2) {
-            log(`Dataset zip still transferring (${size1} → ${size2} bytes) — not interrupting. Monitor in Jupyter.`);
+            log(`Dataset zip still transferring (${size1} → ${size2} bytes) — not interrupting.`);
             setUploadStatus(null);
-            startLogPolling(jUrl, 0);
+            startLogPolling(host, port, keyPath, 0);
             return;
           }
           log(`Dataset zip present and stable (${Number(size1).toLocaleString()} bytes) — skipping re-upload.`);
           setUploadStatus(null);
-          uploadToVolume(jUrl, { skipZipUpload: true });
+          uploadToVolume(host, port, keyPath, { skipZipUpload: true });
           return;
         }
       }
 
-      // Files not on pod — full restart
       setUploadStatus(null);
       log("Restarting upload…");
-      uploadToVolume(jUrl);
+      uploadToVolume(host, port, keyPath);
     } catch {
-      // Jupyter not responding yet — wait for it to come up
       setUploadStatus(null);
-      log("Jupyter not responding yet — waiting for pod to finish starting…");
-      startJupyterWait(jUrl);
+      log("SSH not responding yet — waiting for pod to finish starting…");
+      startSshWait(host, port, keyPath);
     }
   };
 
   // Reconnect to an active pod if we navigated away and came back
   useEffect(() => {
     if (!runpodActivePodId || !hasApiKey) return;
-    getPod(settings.runpodApiKey, runpodActivePodId).then((p) => {
+    if (_connectedPodId === runpodActivePodId) return;
+    _connectedPodId = runpodActivePodId;
+    getPod(apiKeyRef.current, runpodActivePodId).then((p) => {
       setPodLocal(p);
       setPhase("training");
-      // Restart pod status polling
+      linkedPodRef.current = true;
       startPolling(runpodActivePodId);
-      // If Jupyter was already ready, restart log polling from end of already-seen lines
-      if (runpodActiveJupyterUrl) {
-        jupyterUrlRef.current = runpodActiveJupyterUrl;
-        setJupyterUrlLocal(runpodActiveJupyterUrl);
+      // If SSH info is already known, check training status
+      if (runpodActiveSshHost && runpodActiveSshPort && settings.sshKeyPath) {
+        const host = runpodActiveSshHost;
+        const port = runpodActiveSshPort;
+        const keyPath = settings.sshKeyPath;
+        sshHostRef.current = host;
+        setSshHostLocal(host);
+        setSshPortLocal(port);
         log(`Reconnected to pod ${runpodActivePodId} — checking training status…`);
-        // Check sentinel file first — tiny file, always readable even if training.log is large
-        invoke<string>("jupyter_read_file", {
-          jupyterUrl: runpodActiveJupyterUrl,
-          password: "lorastudio",
-          remotePath: "workspace/.training_done",
-        }).then(() => {
-          log(`Training already completed — starting download…`);
-          downloadOutputs(runpodActiveJupyterUrl);
-        }).catch(() => {
-          // No sentinel — check training.log for status (may be large; falls back to checkAndResume on error)
-          invoke<string>("jupyter_read_file", {
-            jupyterUrl: runpodActiveJupyterUrl,
-            password: "lorastudio",
-            remotePath: "workspace/training.log",
-          }).then((content) => {
-            if (content.trim()) {
-              if (content.includes("training failed")) {
-                log(`Training previously failed — see pod logs. Use Retry to relaunch or Terminate to stop billing.`);
-                setTrainingHalted(true);
-              } else if (content.includes("training complete")) {
-                log(`Training already completed — starting download…`);
-                downloadOutputs(runpodActiveJupyterUrl);
-              } else {
-                log(`Training already running — resuming log tail…`);
-                startLogPolling(runpodActiveJupyterUrl, content.split("\n").length);
-              }
+        sshRunCommand(host, port, keyPath, "test -f /workspace/.training_done && echo yes || echo no")
+          .then((res) => {
+            if (res.trim() === "yes") {
+              log("Training already completed — starting download…");
+              downloadOutputs(host, port, keyPath);
             } else {
-              log(`Training log empty — restarting upload…`);
-              uploadToVolume(runpodActiveJupyterUrl);
+              sshRunCommand(host, port, keyPath, "cat /workspace/training.log 2>/dev/null || echo ''")
+                .then((content) => {
+                  if (content.trim()) {
+                    if (content.includes("training failed")) {
+                      log("Training previously failed — use Retry to relaunch or Terminate to stop billing.");
+                      setTrainingHalted(true);
+                    } else if (content.includes("training complete")) {
+                      log("Training already completed — starting download…");
+                      downloadOutputs(host, port, keyPath);
+                    } else {
+                      log("Training already running — resuming log tail…");
+                      startLogPolling(host, port, keyPath, content.split("\n").length);
+                    }
+                  } else {
+                    log("Training log empty — restarting upload…");
+                    uploadToVolume(host, port, keyPath);
+                  }
+                })
+                .catch(() => checkAndResume(host, port, keyPath));
             }
-          }).catch(() => {
-            // training.log doesn't exist — check what's on the pod before deciding what to re-upload
-            checkAndResume(runpodActiveJupyterUrl);
-          });
-        });
+          })
+          .catch(() => checkAndResume(host, port, keyPath));
       }
     }).catch(() => {
-      // Pod no longer exists — clear stored state
+      _connectedPodId = "";
       setRunpodActivePodId("");
-      setRunpodActiveJupyterUrl("");
+      setRunpodActiveSshHost("");
+      setRunpodActiveSshPort(0);
       setPhase("config");
     });
   }, []); // eslint-disable-line react-hooks/exhaustive-deps — intentionally runs once on mount
@@ -294,7 +341,7 @@ export default function RunPodLauncher() {
     setFetchingVolumes(false);
   };
 
-  // Infer stepsPerSec for any GPU by VRAM tier (used for both estimatedTime and bestValueGpu)
+  // Infer stepsPerSec for any GPU by VRAM tier (used for estimatedTime display)
   const stepsPerSecForGpu = (gpuId: string): number | null => {
     const known = RECOMMENDED_GPUS.find((g) => g.id === gpuId);
     if (known) return known.stepsPerSec;
@@ -312,29 +359,6 @@ export default function RunPodLauncher() {
     if (seconds < 60) return `~${Math.round(seconds)}s`;
     if (seconds < 3600) return `~${Math.round(seconds / 60)}min`;
     return `~${(seconds / 3600).toFixed(1)}hr`;
-  })();
-
-  // Best-value GPU: lowest estimated total cost = (training + 20min padding) × price/hr
-  // Only computed once live prices are available; excludes GPUs with no current price (unavailable).
-  const bestValueGpuId = (() => {
-    if (!livePrices || !liveGpuTypes) return null;
-    const PADDING_HOURS = 20 / 60;
-    const gpuList = liveGpuTypes.filter((g) =>
-      config.cloudType === "COMMUNITY" ? g.communityCloud : g.secureCloud
-    );
-    let best: { id: string; cost: number } | null = null;
-    for (const g of gpuList) {
-      const price = config.cloudType === "COMMUNITY"
-        ? (livePrices[g.id]?.community ?? 0)
-        : (livePrices[g.id]?.secure ?? 0);
-      if (price <= 0) continue; // not available right now
-      const sps = stepsPerSecForGpu(g.id);
-      if (!sps) continue;
-      const trainingHours = config.steps / (sps * resFactor) / 3600;
-      const totalCost = (trainingHours + PADDING_HOURS) * price;
-      if (!best || totalCost < best.cost) best = { id: g.id, cost: totalCost };
-    }
-    return best;
   })();
 
   const logFilePath = character.outputDir ? `${character.outputDir}/runpod.log` : null;
@@ -387,22 +411,28 @@ export default function RunPodLauncher() {
   const launchPod = async () => {
     if (!hasApiKey) { log("Error: Add your RunPod API key in Settings."); return; }
     if (!zipPath) { log("Error: Package dataset first."); return; }
+    if (phase === "training") return; // guard against spam-clicks
+    if (!settings.sshKeyPath) { log("Error: SSH key not configured — click Setup above first."); return; }
+    linkedPodRef.current = false;
 
+    _connectedPodId = "";
     setPhase("training");
     log("Launching RunPod pod...");
 
     try {
+      // Always re-register SSH key before pod creation — ensures RunPod injects the correct key on startup
+      try {
+        const keyPath = await setupSshKey(settings.runpodApiKey);
+        if (keyPath !== settings.sshKeyPath) setSettings({ sshKeyPath: keyPath });
+      } catch (keyErr) {
+        log(`SSH key registration warning: ${keyErr} — continuing with existing key`);
+      }
+
       const selectedVol = networkVolumes.find((v) => v.id === config.networkVolumeId);
-      // Only attach the volume if the selected GPU type is available in the volume's DC.
-      // If dcGpuIds is empty (no volume selected or prices not fetched), fall through to no-volume mode.
-      const gpuInVolumesDc = !!config.networkVolumeId && dcGpuIds.has(config.gpuTypeId);
-      const useVolume = gpuInVolumesDc;
+      // Volume attach: only if volume selected and GPU available in its DC (dcGpuIds may be empty)
+      const useVolume = !!config.networkVolumeId;
       const dataCenterId = useVolume ? selectedVol?.dataCenterId : undefined;
       effectiveVolumeIdRef.current = useVolume ? config.networkVolumeId : null;
-
-      if (config.networkVolumeId && !useVolume) {
-        log(`Note: Selected GPU is not available in volume's datacenter (${selectedVol?.dataCenterId}). Launching without volume — model will download fresh.`);
-      }
 
       const podSpec = {
         name: `lora-${character.triggerWord}-${Date.now()}`,
@@ -411,14 +441,10 @@ export default function RunPodLauncher() {
         gpuTypeId: config.gpuTypeId,
         cloudType: config.cloudType,
         containerDiskInGb: config.containerDiskInGb,
-        // With a network volume: /workspace is the network volume, local vol only needs a few GB for temp
-        // Without: /workspace must hold the model (4-8GB+), dataset, and output — use 50GB
         volumeInGb: useVolume ? 5 : 50,
         ...(useVolume ? { networkVolumeId: config.networkVolumeId } : { volumeMountPath: undefined }),
         ...(dataCenterId ? { dataCenterId } : {}),
-        env: [
-          { key: "JUPYTER_PASSWORD", value: "lorastudio" },
-        ],
+        env: [],
       };
       log(`Spec: gpu=${podSpec.gpuTypeId} cloud=${podSpec.cloudType} disk=${podSpec.containerDiskInGb}GB vol=${podSpec.volumeInGb}GB dc=${dataCenterId ?? "any"} image=${podSpec.imageName}`);
       const newPod = await createPod(settings.runpodApiKey, podSpec);
@@ -445,7 +471,7 @@ export default function RunPodLauncher() {
     }
   };
 
-  const jupyterUrlRef = useRef("");
+  const sshHostRef = useRef("");
 
   useEffect(() => {
     if (autoScroll && logScrollRef.current) {
@@ -464,46 +490,46 @@ export default function RunPodLauncher() {
     return () => document.removeEventListener("mousedown", handler);
   }, []);
 
-  // Start polling Jupyter readiness — clears any existing wait first (prevents duplicates across remounts)
-  const startJupyterWait = (url: string, opts: { checkFirst?: boolean } = {}) => {
-    if (_jupyterWaitId) { clearInterval(_jupyterWaitId); _jupyterWaitId = null; }
-    // Set the ref immediately so the pod poll tick's !jupyterUrlRef.current guard
-    // prevents a duplicate call before the first jupyter_is_ready check fires
-    jupyterUrlRef.current = url;
+  // Start polling SSH readiness — clears any existing wait first (prevents duplicates across remounts)
+  const startSshWait = (host: string, port: number, keyPath: string, opts: { checkFirst?: boolean } = {}) => {
+    if (_sshWaitId) { clearInterval(_sshWaitId); _sshWaitId = null; }
+    // Set the ref immediately so the pod poll tick's !sshHostRef.current guard
+    // prevents a duplicate call before the first ssh_is_ready check fires
+    sshHostRef.current = host;
     let attempts = 0;
-    let checking = false; // prevent overlapping calls if a check takes longer than the interval
-    log(`Waiting for Jupyter to come up…`);
-    const stopJupyterTicker = startTicker("Waiting for Jupyter…");
+    let checking = false;
+    log(`Waiting for SSH to come up…`);
+    const stopSshTicker = startTicker("Waiting for SSH…");
 
     const check = async () => {
       if (checking) return;
       checking = true;
       attempts++;
       try {
-        const ready = await invoke<boolean>("jupyter_is_ready", { jupyterUrl: url, password: "lorastudio" });
+        const ready = await sshIsReady(host, port, keyPath);
+        if (attempts <= 3 || attempts % 10 === 0) log(`SSH probe #${attempts} → ${ready ? "ready" : "not ready yet"} (${host}:${port})`);
         if (ready) {
-          if (_jupyterWaitId) { clearInterval(_jupyterWaitId); _jupyterWaitId = null; }
-          stopJupyterTicker();
+          if (_sshWaitId) { clearInterval(_sshWaitId); _sshWaitId = null; }
+          stopSshTicker();
           if (opts.checkFirst) {
-            log(`Jupyter ready — checking pod state…`);
-            checkAndResume(url);
+            log(`SSH ready — checking pod state…`);
+            checkAndResume(host, port, keyPath);
           } else {
-            log(`Jupyter ready — starting upload…`);
-            uploadToVolume(url);
+            log(`SSH ready — starting upload…`);
+            uploadToVolume(host, port, keyPath);
           }
         } else if (attempts >= 120) {
-          // 120 × 5s = 10 min timeout
-          if (_jupyterWaitId) { clearInterval(_jupyterWaitId); _jupyterWaitId = null; }
-          stopJupyterTicker();
-          log(`Jupyter unreachable after 10 min — pod may still be starting. Open ${url}/lab to check manually.`);
+          if (_sshWaitId) { clearInterval(_sshWaitId); _sshWaitId = null; }
+          stopSshTicker();
+          log(`SSH unreachable after 10 min — pod may still be starting. Try: ssh -p ${port} root@${host}`);
         }
       } finally {
         checking = false;
       }
     };
 
-    check(); // fire immediately — don't wait for first interval tick
-    _jupyterWaitId = setInterval(check, 5000);
+    check();
+    _sshWaitId = setInterval(check, 5000);
   };
 
   const applySensibleDefaults = () => {
@@ -588,16 +614,17 @@ export default function RunPodLauncher() {
     ].filter(s => s.trim()).join(" \\\n  ");
   };
 
-  const launchTraining = async (jUrl: string, modelBaseName: string, gpuFlags: { batchSize: number; gradientCheckpointing: boolean; cacheLatents: boolean }) => {
-    const JUPYTER_PASS = "lorastudio";
-    // Guard: refuse to launch if training is already running on the pod
+  const launchTraining = async (host: string, port: number, keyPath: string, modelBaseName: string, gpuFlags: { batchSize: number; gradientCheckpointing: boolean; cacheLatents: boolean }) => {
+    // Guard: refuse to launch if training is already running on the pod.
+    // Check if training.log exists AND is being actively written to (modified in last 30s).
+    // Avoids false positives from container startup processes matching pgrep patterns.
     try {
-      await jupyterRunCommand(jUrl, JUPYTER_PASS, `pgrep -f sdxl_train_network > /workspace/.trainpid.txt 2>/dev/null || echo "" > /workspace/.trainpid.txt`);
-      await new Promise(r => setTimeout(r, 2000));
-      const pid = (await invoke<string>("jupyter_read_file", { jupyterUrl: jUrl, password: JUPYTER_PASS, remotePath: "workspace/.trainpid.txt" }).catch(() => "")).trim();
-      if (pid) {
-        log(`Training already running (pid ${pid}) — not launching a duplicate.`);
-        startLogPolling(jUrl, 0);
+      const check = (await sshRunCommand(host, port, keyPath,
+        "test -f /workspace/training.log && find /workspace/training.log -mmin -0.5 -print 2>/dev/null | head -1 || echo ''"
+      ).catch(() => "")).trim();
+      if (check) {
+        log(`Training log is actively being written — not launching a duplicate.`);
+        startLogPolling(host, port, keyPath, 0);
         return;
       }
     } catch { /* proceed */ }
@@ -655,7 +682,7 @@ export default function RunPodLauncher() {
     ].filter(s => s.trim()).join(" \\\n  ");
     await invoke("save_project", { path: `${character.outputDir}/training_command.txt`, data: `# Training command (debug)\n# Script: ${trainScript}\n# Generated: ${new Date().toISOString()}\n\n${trainingArgs}\n` });
     log(`[info] accelerate launch ${trainScript} --optimizer_type ${config.optimizer} --max_train_steps ${config.steps} --network_dim ${config.networkDim} --network_alpha ${networkAlpha} ${lrFlagStr}${noiseOffsetFlag ? " " + noiseOffsetFlag : " (no noise_offset — SDXL)"}${minSnrFlag ? " " + minSnrFlag : ""}`);
-    await jupyterRunCommand(jUrl, JUPYTER_PASS,
+    await sshRunCommand(host, port, keyPath,
       `nohup bash -c '> /workspace/training.log; SCRIPT=\$(find /workspace -maxdepth 5 -name "${trainScript}" 2>/dev/null | head -1); if [ -z "\$SCRIPT" ]; then echo "ERROR: ${trainScript} not found" >> /workspace/training.log; exit 1; fi; PYTHON=""; for P in /venv/bin/python3 /venv/bin/python /opt/conda/bin/python3 /workspace/venv/bin/python3 /workspace/venv/bin/python /usr/local/bin/python3; do if [ -f "\$P" ] && "\$P" -c "import accelerate" 2>/dev/null; then PYTHON="\$P"; break; fi; done; if [ -z "\$PYTHON" ]; then echo "ERROR: no Python with accelerate found" >> /workspace/training.log; exit 1; fi; ACCEL=\$(dirname "\$PYTHON")/accelerate; mkdir -p /workspace/output; echo "launcher: \$ACCEL" >> /workspace/training.log; export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True; cd "\$(dirname "\$SCRIPT")" && "\$ACCEL" launch --num_cpu_threads_per_process 1 "\$SCRIPT" --dataset_config /workspace/kohya_config.toml --pretrained_model_name_or_path /workspace/models/${modelBaseName} --output_dir /workspace/output --output_name ${character.triggerWord}_lora --save_model_as safetensors --max_train_steps ${config.steps} ${lrFlagStr} --lr_scheduler ${lrScheduler} ${lrWarmupFlag} --optimizer_type ${config.optimizer} ${optimizerArgs} --network_module networks.lora --network_dim ${config.networkDim} --network_alpha ${networkAlpha} ${noiseOffsetFlag} ${minSnrFlag} ${vPredFlag} ${noHalfVaeFlag} --mixed_precision bf16 --save_precision fp16 ${gradCkptFlag} ${cacheLatentsFlag} --save_every_n_steps ${saveEveryNSteps} >> /workspace/training.log 2>&1; EXIT_CODE=\$?; echo "training complete" >> /workspace/training.log; if [ \$EXIT_CODE -eq 0 ]; then echo "done" > /workspace/.training_done; else echo "training failed (exit \$EXIT_CODE)" >> /workspace/training.log; fi' &`
     );
     setPipelineStep(3);
@@ -663,15 +690,14 @@ export default function RunPodLauncher() {
     setUploadStatus(null);
     log(`Training started — polling /workspace/training.log for progress…`);
     log(`Note: training can take a long time depending on your dataset and GPU. You can close the app and reopen it later — it will reconnect to the running pod.`);
-    startLogPolling(jUrl, 0);
+    startLogPolling(host, port, keyPath, 0);
   };
 
-  const uploadToVolume = async (jUrl: string, opts: { skipZipUpload?: boolean } = {}) => {
+  const uploadToVolume = async (host: string, port: number, keyPath: string, opts: { skipZipUpload?: boolean } = {}) => {
     if (_uploadInProgress) { log("Upload already in progress — ignoring duplicate request."); return; }
     _uploadInProgress = true;
     const actualZipPath = zipPath || expectedZipPath;
     if (!actualZipPath && !opts.skipZipUpload) { _uploadInProgress = false; return; }
-    const JUPYTER_PASS = "lorastudio";
     const volumeId = effectiveVolumeIdRef.current;
     const datasetKey = `${character.triggerWord}_${Date.now()}`;
     const existing = volumeId ? settings.volumeContents?.[volumeId] : null;
@@ -683,8 +709,7 @@ export default function RunPodLauncher() {
       // Determine optimal training flags for the selected GPU
       const selectedVram =
         RECOMMENDED_GPUS.find(g => g.id === config.gpuTypeId)?.vram ??
-        liveGpuTypes?.find(g => g.id === config.gpuTypeId)?.memoryInGb ??
-        0;
+        (liveGpuTypes?.find(g => g.id === config.gpuTypeId)?.memoryInGb ?? 0);
       const gpuFlags = gpuTrainingFlags(selectedVram, config.optimizer);
       if (selectedVram > 0) {
         log(`GPU: ${config.gpuTypeId} (${selectedVram}GB VRAM) → batch=${gpuFlags.batchSize}, grad_ckpt=${gpuFlags.gradientCheckpointing}, cache_latents=${gpuFlags.cacheLatents}`);
@@ -705,17 +730,17 @@ export default function RunPodLauncher() {
       setPipelineStep(1);
       setUploadStatus(`Uploading kohya_config.toml…`);
       log(`Uploading kohya_config.toml…`);
-      await jupyterUploadFile(jUrl, JUPYTER_PASS, `workspace/${configName}`, configPath);
+      await sshUploadFile(host, port, keyPath, configPath, `/workspace/${configName}`);
       log(`Config uploaded.`);
 
-      // Dataset upload + extraction — skip only in reconnect mode (skipZipUpload), never on a fresh upload
+      // Dataset upload + extraction
       let datasetExtracted = false;
       if (opts.skipZipUpload) {
-        try {
-          await invoke<string>("jupyter_read_file", { jupyterUrl: jUrl, password: JUPYTER_PASS, remotePath: "workspace/.extract_done" });
+        const res = await sshRunCommand(host, port, keyPath, "test -f /workspace/.extract_done && echo yes || echo no").catch(() => "no");
+        if (res.trim() === "yes") {
           log("Dataset already extracted on pod — skipping upload.");
           datasetExtracted = true;
-        } catch { /* needs extraction */ }
+        }
       }
 
       if (!datasetExtracted) {
@@ -723,7 +748,7 @@ export default function RunPodLauncher() {
           log(`Uploading ${zipName} to volume…`);
           const stopZipTicker = startTicker(`Uploading dataset zip…`);
           try {
-            await jupyterUploadFile(jUrl, JUPYTER_PASS, `workspace/${zipName}`, actualZipPath!);
+            await sshUploadFile(host, port, keyPath, actualZipPath!, `/workspace/${zipName}`);
           } finally {
             stopZipTicker();
           }
@@ -731,15 +756,13 @@ export default function RunPodLauncher() {
         }
         setUploadStatus(`Extracting dataset on pod…`);
         log(`Extracting dataset…`);
-        await jupyterRunCommand(jUrl, JUPYTER_PASS, `rm -f /workspace/.extract_done; nohup bash -c 'cd /workspace && mkdir -p dataset models && unzip -o ${zipName} -d dataset && echo done > /workspace/.extract_done' &`);
+        await sshRunCommand(host, port, keyPath, `rm -f /workspace/.extract_done; nohup bash -c 'cd /workspace && mkdir -p dataset models && unzip -o ${zipName} -d dataset && echo done > /workspace/.extract_done' &`);
         let extracted = false;
         for (let i = 0; i < 60 && !extracted; i++) {
           await new Promise(r => setTimeout(r, 5000));
           setUploadStatus(`Extracting dataset… (${(i + 1) * 5}s)`);
-          try {
-            await invoke<string>("jupyter_read_file", { jupyterUrl: jUrl, password: JUPYTER_PASS, remotePath: "workspace/.extract_done" });
-            extracted = true;
-          } catch { /* not done yet */ }
+          const res = await sshRunCommand(host, port, keyPath, "test -f /workspace/.extract_done && echo yes || echo no").catch(() => "no");
+          if (res.trim() === "yes") extracted = true;
         }
         if (!extracted) throw new Error("Dataset extraction timed out after 5 minutes");
       }
@@ -751,9 +774,9 @@ export default function RunPodLauncher() {
 
       let modelOnVolume = false;
       try {
-        const manifest = await invoke<string>("jupyter_read_file", { jupyterUrl: jUrl, password: JUPYTER_PASS, remotePath: "workspace/.model_manifest" });
+        const manifest = await sshRunCommand(host, port, keyPath, "cat /workspace/.model_manifest 2>/dev/null || echo ''");
         modelOnVolume = manifest.trim() === modelBaseName;
-      } catch { /* manifest absent — volume is fresh or manifest was not written */ }
+      } catch { /* manifest absent */ }
       if (!modelOnVolume) modelOnVolume = existing?.modelName === modelBaseName;
 
       if (modelOnVolume) {
@@ -763,7 +786,7 @@ export default function RunPodLauncher() {
           log(`WARNING: Replacing model on volume (${existing.modelName} → ${modelBaseName}).`);
         }
         log(`Downloading checkpoint via pod: ${config.baseModelDownloadUrl}`);
-        await jupyterRunCommand(jUrl, JUPYTER_PASS,
+        await sshRunCommand(host, port, keyPath,
           `rm -f /workspace/.model_done; mkdir -p /workspace/models && nohup bash -c 'wget -q -O /workspace/models/${modelBaseName} "${config.baseModelDownloadUrl}" && echo "${modelBaseName}" > /workspace/.model_manifest && echo done > /workspace/.model_done' &`
         );
         let modelReady = false;
@@ -771,10 +794,8 @@ export default function RunPodLauncher() {
           await new Promise(r => setTimeout(r, 15000));
           const elapsed = `${Math.floor((i + 1) * 15 / 60)}m ${((i + 1) * 15) % 60}s`;
           setUploadStatus(`Downloading ${modelBaseName} on pod… (${elapsed})`);
-          try {
-            await invoke<string>("jupyter_read_file", { jupyterUrl: jUrl, password: JUPYTER_PASS, remotePath: "workspace/.model_done" });
-            modelReady = true;
-          } catch { /* not done yet */ }
+          const res = await sshRunCommand(host, port, keyPath, "test -f /workspace/.model_done && echo yes || echo no").catch(() => "no");
+          if (res.trim() === "yes") modelReady = true;
         }
         if (!modelReady) throw new Error(`Model download timed out after 30 minutes`);
         log(`Model downloaded.`);
@@ -785,11 +806,11 @@ export default function RunPodLauncher() {
         log(`Uploading checkpoint from local path (this may take a while)…`);
         const stopModelUploadTicker = startTicker(`Uploading ${modelBaseName}…`);
         try {
-          await jupyterUploadFile(jUrl, JUPYTER_PASS, `workspace/models/${modelBaseName}`, config.baseModelLocalPath);
+          await sshUploadFile(host, port, keyPath, config.baseModelLocalPath, `/workspace/models/${modelBaseName}`);
         } finally {
           stopModelUploadTicker();
         }
-        await jupyterRunCommand(jUrl, JUPYTER_PASS, `echo "${modelBaseName}" > /workspace/.model_manifest`);
+        await sshRunCommand(host, port, keyPath, `echo "${modelBaseName}" > /workspace/.model_manifest`);
         log(`Model uploaded.`);
       } else {
         log(`WARNING: No base model source set. Training will fail unless the model is already at /workspace/models/${modelBaseName}.`);
@@ -799,7 +820,7 @@ export default function RunPodLauncher() {
         setSettings({ volumeContents: { ...settings.volumeContents, [volumeId]: { datasetKey, modelName: modelBaseName, uploadedAt: new Date().toISOString() } } });
       }
 
-      await launchTraining(jUrl, modelBaseName, gpuFlags);
+      await launchTraining(host, port, keyPath, modelBaseName, gpuFlags);
       _uploadInProgress = false;
     } catch (err) {
       _uploadInProgress = false;
@@ -808,8 +829,7 @@ export default function RunPodLauncher() {
     }
   };
 
-  const downloadOutputs = async (jUrl: string) => {
-    const JUPYTER_PASS = "lorastudio";
+  const downloadOutputs = async (host: string, port: number, keyPath: string) => {
     const char = characterRef.current;
     const destDir = char.outputDir || char.loraDir;
     if (!destDir) { log(`Cannot download: no loraDir or outputDir set on character.`); return; }
@@ -818,9 +838,8 @@ export default function RunPodLauncher() {
     setDownloadFailed(false);
     log(`Training complete — downloading LoRA to ${destDir}…`);
     try {
-      // List output files via Jupyter contents API (more reliable than terminal ls)
-      const dirEntries = await invoke<string[]>("jupyter_list_dir", { jupyterUrl: jUrl, password: JUPYTER_PASS, remotePath: "workspace/output" });
-      const files = dirEntries.filter(n => n.endsWith(".safetensors")).map(n => `workspace/output/${n}`);
+      const listing = await sshRunCommand(host, port, keyPath, "ls -1 /workspace/output/*.safetensors 2>/dev/null || echo ''");
+      const files = listing.trim().split("\n").filter(f => f.trim().endsWith(".safetensors")).map(f => f.trim());
 
       if (files.length === 0) {
         log(`No .safetensors files found in /workspace/output/ — training may still be running or output is in a different location.`);
@@ -842,12 +861,7 @@ export default function RunPodLauncher() {
         log(`Downloading ${fileLabel}…`);
         const stopDownloadTicker = startTicker(`Downloading ${fileLabel}…`);
         try {
-          await invoke("jupyter_download_file", {
-            jupyterUrl: jUrl,
-            password: JUPYTER_PASS,
-            remotePath: remotePath.replace(/^\//, ""),
-            localPath,
-          });
+          await sshDownloadFile(host, port, keyPath, remotePath, localPath);
         } finally {
           stopDownloadTicker();
         }
@@ -856,63 +870,63 @@ export default function RunPodLauncher() {
       setUploadStatus(null);
       setPipelineStep(5);
       log(`Download complete.`);
-      // Auto-terminate pod to stop billing (if enabled)
       const podId = podRef.current?.id;
       const apiKey = apiKeyRef.current;
       if (autoTerminateRef.current && podId && apiKey) {
         try {
           await terminatePod(apiKey, podId);
           log(`Pod terminated — billing stopped.`);
-          setPod(null);
-          setPhase("done");
         } catch (err) {
           log(`Auto-terminate failed: ${err} — use the Terminate button to stop billing.`);
+        } finally {
+          if (_podPollId) { clearInterval(_podPollId); _podPollId = null; }
+          if (_logPollId) { clearInterval(_logPollId); _logPollId = null; }
+          if (_sshWaitId) { clearInterval(_sshWaitId); _sshWaitId = null; }
+          _connectedPodId = "";
+          setPod(null);
+          setSshInfo("", 0);
+          sshHostRef.current = "";
+          setRunpodActivePodId("");
+          setRunpodActiveSshHost("");
+          setRunpodActiveSshPort(0);
+          setPhase("done");
         }
       }
     } catch (err) {
       setUploadStatus(null);
       log(`Download error: ${err}`);
-      log(`Pod is still running — use Retry Download to try again, or open Jupyter to retrieve the file manually.`);
+      log(`Pod is still running — use Retry Download to try again.`);
       setDownloadFailed(true);
     }
   };
 
-  const startLogPolling = (jUrl: string, fromLine: number) => {
-    const JUPYTER_PASS = "lorastudio";
+  const startLogPolling = (host: string, port: number, keyPath: string, fromLine: number) => {
     let seenLines = fromLine;
     let inTraceback = false;
     let detected = false;
     let tqdmMaxTotal = 0; // tracks largest tqdm total seen — used to ignore per-epoch bars
 
-    // Called at most once — prevents double-download if both sentinel and log detect completion
     const triggerCompletion = () => {
       if (detected) return;
       detected = true;
       if (_logPollId) { clearInterval(_logPollId); _logPollId = null; }
       setUploadStatus(null);
-      downloadOutputs(jUrl);
+      downloadOutputs(host, port, keyPath);
     };
 
     if (_logPollId) clearInterval(_logPollId);
     _logPollId = setInterval(async () => {
-      // Sentinel file check — training script writes .training_done on success.
-      // This file is tiny and always readable, unlike training.log which can grow to many MB
-      // of tqdm output and silently fail to load via the Jupyter Contents API.
-      invoke<string>("jupyter_read_file", {
-        jupyterUrl: jUrl,
-        password: JUPYTER_PASS,
-        remotePath: "workspace/.training_done",
-      }).then(() => triggerCompletion()).catch(() => {});
+      // Sentinel file check — training script writes .training_done on success
+      sshRunCommand(host, port, keyPath, "test -f /workspace/.training_done && echo yes || echo no")
+        .then((r) => { if (r.trim() === "yes") triggerCompletion(); })
+        .catch(() => {});
 
       try {
-        const content = await invoke<string>("jupyter_read_file", {
-          jupyterUrl: jUrl,
-          password: JUPYTER_PASS,
-          remotePath: "workspace/training.log",
-        });
-        const lines = content.split("\n");
-        const newLines = lines.slice(seenLines);
-        seenLines = lines.length;
+        // Load only new lines since last poll (avoids 50MB+ log reads on long runs)
+        const newContent = await sshRunCommand(host, port, keyPath, `awk 'NR>${seenLines}' /workspace/training.log 2>/dev/null`);
+        const totalStr = await sshRunCommand(host, port, keyPath, "wc -l < /workspace/training.log 2>/dev/null || echo 0").catch(() => "0");
+        seenLines = parseInt(totalStr.trim(), 10) || seenLines;
+        const newLines = newContent.split("\n");
 
         let lastPodLine = "";
         for (const raw of newLines) {
@@ -950,17 +964,17 @@ export default function RunPodLauncher() {
           }
         }
 
-        const newContent = newLines.join("\n");
+        const newContentStr = newLines.join("\n");
         // Stop polling on completion or fatal halt (check only new lines to avoid re-triggering)
         // Check failure FIRST — the training script always writes "training complete" before
         // "training failed (exit N)", so if both appear we must not treat it as success.
-        if (/training failed \(exit|ModuleNotFoundError|No module named|command not found/i.test(newContent)) {
+        if (/training failed \(exit|ModuleNotFoundError|No module named|command not found/i.test(newContentStr)) {
           if (_logPollId) { clearInterval(_logPollId); _logPollId = null; }
           if (_podPollId) { clearInterval(_podPollId); _podPollId = null; setPolling(false); }
           log(`Training halted — see errors above.`);
           log(`Pod is still running — use Retry to relaunch, or Terminate to stop billing.`);
           setTrainingHalted(true);
-        } else if (/training (finished|complete|done)|^training complete$/im.test(newContent)) {
+        } else if (/training (finished|complete|done)|^training complete$/im.test(newContentStr)) {
           triggerCompletion();
         }
       } catch { /* file not yet available */ }
@@ -981,20 +995,20 @@ export default function RunPodLauncher() {
       if (_podPollId) { clearInterval(_podPollId); _podPollId = null; }
       setPolling(false);
       setPod(null);
-      setJupyterUrl(null);
-      jupyterUrlRef.current = "";
+      sshHostRef.current = "";
+      setSshInfo("", 0);
       if (_logPollId) { clearInterval(_logPollId); _logPollId = null; }
-      if (_jupyterWaitId) { clearInterval(_jupyterWaitId); _jupyterWaitId = null; }
+      if (_sshWaitId) { clearInterval(_sshWaitId); _sshWaitId = null; }
       setUploadStatus(null);
       setPhase("done");
-      // Clear persisted pod ID so reconnect effect doesn't re-fire on next mount
       setRunpodActivePodId("");
-      setRunpodActiveJupyterUrl("");
+      setRunpodActiveSshHost("");
+      setRunpodActiveSshPort(0);
     };
     const tick = async () => {
       if (cancelled) return;
       try {
-        const updated = await getPod(settings.runpodApiKey, podId);
+        const updated = await getPod(apiKeyRef.current, podId);
         consecutiveErrors = 0;
         setPod(updated);
         const terminal = updated.status === "EXITED" || updated.status === "TERMINATED" || updated.status === "DEAD";
@@ -1002,17 +1016,24 @@ export default function RunPodLauncher() {
           stopPolling(`Pod ${updated.status.toLowerCase()} — terminated externally.`);
         } else if (updated.status === "RUNNING") {
           const uptime = updated.runtime?.uptimeInSeconds ?? 0;
-          const url = `https://${updated.id}-8888.proxy.runpod.net`;
-          setJupyterUrl(url);
-          // Always stop the pod-start ticker once the pod is running — including the
-          // linkPod path where startJupyterWait sets jupyterUrlRef.current before this
-          // tick fires, which previously caused the guard below to skip stopPodTicker().
           stopPodTicker();
-          // Only start readiness polling once the pod has real uptime (Docker is running)
-          if (!jupyterUrlRef.current && uptime > 0) {
-            jupyterUrlRef.current = url;
-            log(`Pod running (uptime: ${uptime}s) — waiting for Jupyter…`);
-            startJupyterWait(url);
+          // Only fetch SSH info once (sshHostRef guards against repeated calls)
+          if (!sshHostRef.current) {
+            try {
+              // Try pod runtime ports first (reliable), fall back to runpodctl ssh info
+              const info = await getSshInfo(apiKeyRef.current, updated.id);
+              if (info) {
+                setSshInfo(info.host, info.port);
+                sshHostRef.current = info.host;
+                const uptimeStr = uptime > 0 ? ` (uptime: ${uptime}s)` : "";
+                log(`Pod running${uptimeStr} — waiting for SSH on ${info.host}:${info.port}…`);
+                startSshWait(info.host, info.port, settings.sshKeyPath, { checkFirst: linkedPodRef.current });
+              } else {
+                log(`SSH info not available yet for pod ${updated.id} — retrying next tick…`);
+              }
+            } catch (sshErr) {
+              log(`SSH info fetch failed: ${sshErr} — retrying next tick`);
+            }
           }
         }
       } catch (err) {
@@ -1022,9 +1043,7 @@ export default function RunPodLauncher() {
         } else {
           consecutiveErrors++;
           if (consecutiveErrors >= 20) {
-            // If upload/training is already running, API errors are just transient blips — don't terminate,
-            // but back off to 60s polling to stop flooding the log.
-            if (jupyterUrlRef.current) {
+            if (sshHostRef.current) {
               log(`RunPod API unreachable — pod likely still running. Slowing status checks to 1/min.`);
               consecutiveErrors = 0;
               if (_podPollId) { clearInterval(_podPollId); }
@@ -1047,12 +1066,22 @@ export default function RunPodLauncher() {
     try {
       await terminatePod(settings.runpodApiKey, pod.id);
       log(`Pod ${pod.id} terminated.`);
-      setPod(null);
-      setPhase("done");
     } catch (err) {
       log(`Terminate error: ${err}`);
     } finally {
       setTerminating(false);
+      // Stop all polling and clear persisted pod state
+      if (_podPollId) { clearInterval(_podPollId); _podPollId = null; }
+      if (_logPollId) { clearInterval(_logPollId); _logPollId = null; }
+      if (_sshWaitId) { clearInterval(_sshWaitId); _sshWaitId = null; }
+      _connectedPodId = "";
+      setPod(null);
+      setSshInfo("", 0);
+      sshHostRef.current = "";
+      setRunpodActivePodId("");
+      setRunpodActiveSshHost("");
+      setRunpodActiveSshPort(0);
+      setPhase("done");
     }
   };
 
@@ -1070,62 +1099,39 @@ export default function RunPodLauncher() {
     setPod(p);
     setPhase("training");
     setPipelineStep(0);
-    log(`Linked to existing pod: ${p.id}`);
-    const url = `https://${p.id}-8888.proxy.runpod.net`;
-    setJupyterUrl(url);
+    linkedPodRef.current = true;
+    log(`Linked to existing pod: ${p.id} — fetching SSH info…`);
+    // SSH info will be fetched in startPolling's RUNNING tick
     startPolling(p.id);
-    startJupyterWait(url, { checkFirst: true });
   };
 
   const fetchPrices = async () => {
     if (!hasApiKey) { log("Add your RunPod API key in Settings first."); return; }
     setFetchingPrices(true);
-    const selectedVol = networkVolumes.find((v) => v.id === config.networkVolumeId);
-    const dataCenterId = selectedVol?.dataCenterId;
     try {
-      // Always fetch global GPU list; if a volume is selected, also fetch DC-specific to identify cached GPUs
-      const [allGpus, dcGpus] = await Promise.all([
+      const [gpus, prices] = await Promise.allSettled([
         listGpuTypes(settings.runpodApiKey),
-        dataCenterId ? listGpuTypes(settings.runpodApiKey, dataCenterId) : Promise.resolve([]),
+        fetchGpuPrices(settings.runpodApiKey),
       ]);
-      setDcGpuIds(new Set(dcGpus.map((g) => g.id)));
-
-      const map: Record<string, { secure: number; community: number }> = {};
-      for (const g of allGpus) {
-        map[g.id] = {
-          secure: g.lowestPrice?.uninterruptablePrice ?? 0,
-          community: g.lowestPrice?.minimumBidPrice ?? 0,
-        };
+      if (gpus.status === "fulfilled") {
+        setLiveGpuTypes([...gpus.value].sort((a, b) => b.memoryInGb - a.memoryInGb));
+      } else {
+        log(`GPU list fetch error: ${gpus.reason}`);
       }
-      setLivePrices(map);
-      // Filter to GPUs that support the selected cloud type, sort by VRAM desc
-      // Prefer GPUs with a non-zero price (available now), but show all supported ones
-      const supported = allGpus.filter((g) =>
-        config.cloudType === "COMMUNITY" ? g.communityCloud : g.secureCloud
-      );
-      const hasPrice = (g: typeof supported[0]) =>
-        config.cloudType === "COMMUNITY"
-          ? (g.lowestPrice?.minimumBidPrice ?? 0) > 0
-          : (g.lowestPrice?.uninterruptablePrice ?? 0) > 0;
-      setLiveGpuTypes(
-        [...supported].sort((a, b) => {
-          // Available (non-zero price) first, then by VRAM desc
-          const aPriced = hasPrice(a) ? 1 : 0;
-          const bPriced = hasPrice(b) ? 1 : 0;
-          if (bPriced !== aPriced) return bPriced - aPriced;
-          return b.memoryInGb - a.memoryInGb;
-        })
-      );
+      if (prices.status === "fulfilled") {
+        setLivePrices(prices.value);
+      }
+      // Pricing failure is silent — GPU list still shows without prices
     } catch (err) {
-      log(`Price fetch error: ${err}`);
+      log(`GPU list fetch error: ${err}`);
     }
     setFetchingPrices(false);
   };
 
-  // Re-fetch GPU list when volume selection or cloud type changes
+  // Re-fetch GPU list when API key is available
   useEffect(() => {
     if (hasApiKey) fetchPrices();
-  }, [config.networkVolumeId, config.cloudType]);
+  }, [hasApiKey]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const searchModels = async (query = modelQuery) => {
     if (!query.trim()) return;
@@ -1281,6 +1287,77 @@ export default function RunPodLauncher() {
           padding: "20px",
           background: "var(--bg-1)",
         }}>
+          {/* Setup panel */}
+          <div style={{ marginBottom: "20px", padding: "12px", background: "var(--accent-glow)", border: "1px solid var(--accent-dim)", borderRadius: "6px" }}>
+              <div style={{ fontFamily: "var(--font-display)", fontSize: "12px", fontWeight: 700, color: "var(--accent-bright)", letterSpacing: "0.05em", marginBottom: "10px", textTransform: "uppercase" }}>
+                Setup
+              </div>
+              {/* Step 1: runpodctl */}
+              <div style={{ display: "flex", alignItems: "center", gap: "8px", marginBottom: "8px" }}>
+                <div style={{ width: "8px", height: "8px", borderRadius: "50%", flexShrink: 0, background: runpodctlStatus === "ready" ? "var(--green)" : "var(--accent-bright)" }} />
+                <span style={{ fontFamily: "var(--font-mono)", fontSize: "10px", color: "var(--text-primary)", flex: 1 }}>
+                  runpodctl CLI
+                </span>
+                {runpodctlStatus === "missing" && (
+                  <button
+                    className="btn-ghost"
+                    style={{ padding: "2px 8px", fontSize: "10px" }}
+                    onClick={async () => {
+                      setRunpodctlStatus("installing");
+                      try {
+                        await installRunpodctl();
+                        setRunpodctlStatus("ready");
+                        log("runpodctl installed.");
+                      } catch (err) {
+                        log(`Install failed: ${err}`);
+                        setRunpodctlStatus("missing");
+                      }
+                    }}
+                  >Install</button>
+                )}
+                {runpodctlStatus === "installing" && (
+                  <span style={{ fontFamily: "var(--font-mono)", fontSize: "10px", color: "var(--text-secondary)" }}>Installing…</span>
+                )}
+                {runpodctlStatus === "ready" && (
+                  <span style={{ fontFamily: "var(--font-mono)", fontSize: "10px", color: "var(--green)" }}>✓</span>
+                )}
+                {runpodctlStatus === "checking" && (
+                  <span style={{ fontFamily: "var(--font-mono)", fontSize: "10px", color: "var(--text-secondary)" }}>Checking…</span>
+                )}
+              </div>
+              {/* Step 2: SSH key */}
+              <div style={{ display: "flex", alignItems: "center", gap: "8px", opacity: runpodctlStatus !== "ready" ? 0.4 : 1 }}>
+                <div style={{ width: "8px", height: "8px", borderRadius: "50%", flexShrink: 0, background: settings.sshKeyPath ? "var(--green)" : "var(--accent-bright)" }} />
+                <span style={{ fontFamily: "var(--font-mono)", fontSize: "10px", color: "var(--text-primary)", flex: 1 }}>
+                  SSH key registered with RunPod
+                </span>
+                {runpodctlStatus === "ready" && (
+                  <button
+                    className="btn-ghost"
+                    style={{ padding: "2px 8px", fontSize: "10px", color: sshKeyState === "done" ? "var(--green)" : sshKeyState === "error" ? "var(--red-bright)" : undefined, borderColor: sshKeyState === "done" ? "var(--green)" : sshKeyState === "error" ? "var(--red)" : undefined }}
+                    disabled={!hasApiKey || sshKeyState === "working"}
+                    title={!hasApiKey ? "Add RunPod API key in Settings first" : ""}
+                    onClick={async () => {
+                      setSshKeyState("working");
+                      try {
+                        const keyPath = await setupSshKey(settings.runpodApiKey);
+                        setSettings({ sshKeyPath: keyPath });
+                        log(`SSH key registered: ${keyPath}`);
+                        setSshKeyState("done");
+                        setTimeout(() => setSshKeyState("idle"), 2000);
+                      } catch (err) {
+                        log(`SSH key setup failed: ${err}`);
+                        setSshKeyState("error");
+                        setTimeout(() => setSshKeyState("idle"), 3000);
+                      }
+                    }}
+                  >
+                    {sshKeyState === "working" ? "Registering…" : sshKeyState === "done" ? "✓ Registered" : sshKeyState === "error" ? "Failed" : settings.sshKeyPath ? "Re-register" : "Setup"}
+                  </button>
+                )}
+              </div>
+          </div>
+
           {/* Dataset summary */}
           <div style={{ marginBottom: "20px" }}>
             <div className="section-label">Dataset Summary</div>
@@ -1298,7 +1375,7 @@ export default function RunPodLauncher() {
                 { label: "Est. training time", value: estimatedTime ?? "—" },
               ].map(({ label, value }) => (
                 <div key={label} style={{ display: "flex", justifyContent: "space-between", marginBottom: "6px" }}>
-                  <span style={{ fontFamily: "var(--font-mono)", fontSize: "10px", color: "var(--text-muted)" }}>{label}</span>
+                  <span style={{ fontFamily: "var(--font-mono)", fontSize: "10px", color: "var(--text-secondary)" }}>{label}</span>
                   <span style={{ fontFamily: "var(--font-mono)", fontSize: "10px", color: "var(--text-primary)" }}>{value}</span>
                 </div>
               ))}
@@ -1311,7 +1388,7 @@ export default function RunPodLauncher() {
                   borderRadius: "4px",
                   fontFamily: "var(--font-mono)",
                   fontSize: "10px",
-                  color: "#d47070",
+                  color: "var(--red-bright)",
                   display: "flex",
                   gap: "6px",
                   alignItems: "center",
@@ -1333,9 +1410,9 @@ export default function RunPodLauncher() {
               </button>
             </div>
             {!hasApiKey ? (
-              <div style={{ fontFamily: "var(--font-mono)", fontSize: "10px", color: "var(--text-muted)" }}>Add RunPod API key in Settings.</div>
+              <div style={{ fontFamily: "var(--font-mono)", fontSize: "10px", color: "var(--text-secondary)" }}>Add RunPod API key in Settings.</div>
             ) : networkVolumes.length === 0 ? (
-              <div style={{ fontFamily: "var(--font-mono)", fontSize: "10px", color: "var(--text-muted)" }}>
+              <div style={{ fontFamily: "var(--font-mono)", fontSize: "10px", color: "var(--text-secondary)" }}>
                 No volumes found.{" "}
                 <span
                   onClick={() => open("https://www.runpod.io/console/user/storage")}
@@ -1359,15 +1436,15 @@ export default function RunPodLauncher() {
                   >
                     <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
                       <div style={{ fontFamily: "var(--font-mono)", fontSize: "11px", color: selected ? "var(--accent-bright)" : "var(--text-primary)" }}>{v.name}</div>
-                      <div style={{ fontFamily: "var(--font-mono)", fontSize: "10px", color: selected ? "var(--accent-bright)" : "var(--text-muted)" }}>{v.size}GB · {v.dataCenterId}</div>
+                      <div style={{ fontFamily: "var(--font-mono)", fontSize: "10px", color: selected ? "var(--accent-bright)" : "var(--text-secondary)" }}>{v.size}GB · {v.dataCenterId}</div>
                     </div>
                     {contents && (
-                      <div style={{ fontFamily: "var(--font-mono)", fontSize: "9px", color: selected ? "var(--accent-bright)" : "var(--text-muted)", marginTop: "3px", opacity: 0.8 }}>
+                      <div style={{ fontFamily: "var(--font-mono)", fontSize: "9px", color: selected ? "var(--accent-bright)" : "var(--text-secondary)", marginTop: "3px", opacity: 0.8 }}>
                         Last upload: {contents.datasetKey} · {new Date(contents.uploadedAt).toLocaleDateString()}
                       </div>
                     )}
                     {selected && (
-                      <div style={{ fontFamily: "var(--font-mono)", fontSize: "9px", color: "var(--text-muted)", marginTop: "3px", opacity: 0.7 }}>
+                      <div style={{ fontFamily: "var(--font-mono)", fontSize: "9px", color: "var(--text-secondary)", marginTop: "3px", opacity: 0.7 }}>
                         Pods will launch in {v.dataCenterId} only
                       </div>
                     )}
@@ -1381,37 +1458,39 @@ export default function RunPodLauncher() {
           <div style={{ marginBottom: "16px" }}>
             <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: "8px" }}>
               <div className="section-label" style={{ margin: 0 }}>GPU</div>
-              <div style={{ display: "flex", gap: "6px" }}>
-                {bestValueGpuId && bestValueGpuId.id !== config.gpuTypeId && (
-                  <button
-                    className="btn-ghost"
-                    onClick={() => setConfig({ gpuTypeId: bestValueGpuId.id })}
-                    style={{ padding: "2px 8px", fontSize: "10px", color: "var(--green)", borderColor: "var(--green)" }}
-                  >
-                    Select best
-                  </button>
-                )}
-                <button className="btn-ghost" onClick={fetchPrices} disabled={fetchingPrices} style={{ padding: "2px 8px", fontSize: "10px" }}>
-                  <RefreshCw size={10} style={{ display: "inline", marginRight: "4px" }} />
-                  {fetchingPrices ? "Fetching…" : "Refresh Prices"}
-                </button>
-              </div>
+              <button className="btn-ghost" onClick={fetchPrices} disabled={fetchingPrices} style={{ padding: "2px 8px", fontSize: "10px" }}>
+                <RefreshCw size={10} style={{ display: "inline", marginRight: "4px" }} />
+                {fetchingPrices ? "Fetching…" : "Refresh GPUs"}
+              </button>
             </div>
-            {(liveGpuTypes
-              ? liveGpuTypes.filter((g) => config.cloudType === "COMMUNITY" ? g.communityCloud : g.secureCloud)
-              : RECOMMENDED_GPUS.map((g) => ({ id: g.id, displayName: g.label, memoryInGb: g.vram, secureCloud: true, communityCloud: true }))
-            ).map((gpu) => {
-              const price = livePrices?.[gpu.id];
-              const priceStr = price
-                ? config.cloudType === "COMMUNITY"
-                  ? `from $${price.community.toFixed(3)}/hr spot`
-                  : `from $${price.secure.toFixed(3)}/hr`
-                : null;
+            {(() => {
+              const gpuList = liveGpuTypes ?? RECOMMENDED_GPUS.map((g) => ({ id: g.id, displayName: g.label, memoryInGb: g.vram }));
+              // Compute best value: steps/sec per $/hr — only for GPUs in RECOMMENDED_GPUS (have throughput data)
+              let bestValueGpuId: string | null = null;
+              if (livePrices) {
+                let bestRatio = 0;
+                for (const gpu of gpuList) {
+                  const rec = RECOMMENDED_GPUS.find(r => r.id === gpu.id || r.label === gpu.displayName);
+                  if (!rec) continue;
+                  const price = livePrices.get(gpu.displayName);
+                  const pricePerHr = config.cloudType === "SECURE"
+                    ? (price?.secure ?? 0)
+                    : (price?.community ?? price?.secure ?? 0);
+                  if (pricePerHr <= 0) continue;
+                  const ratio = rec.stepsPerSec / pricePerHr;
+                  if (ratio > bestRatio) { bestRatio = ratio; bestValueGpuId = gpu.id; }
+                }
+              }
+              return gpuList.map((gpu, idx) => {
               const selected = config.gpuTypeId === gpu.id;
-              const isBest = bestValueGpuId?.id === gpu.id;
+              const price = livePrices?.get(gpu.displayName);
+              const securePrice = price?.secure ?? 0;
+              const communityPrice = price?.community ?? 0;
+              const showPrice = securePrice > 0 || communityPrice > 0;
+              const isBestValue = bestValueGpuId !== null && gpu.id === bestValueGpuId;
               return (
                 <div
-                  key={gpu.id}
+                  key={gpu.id || idx}
                   onClick={() => setConfig({ gpuTypeId: gpu.id })}
                   style={{
                     padding: "8px 10px",
@@ -1419,49 +1498,43 @@ export default function RunPodLauncher() {
                     borderRadius: "5px",
                     cursor: "pointer",
                     background: selected ? "var(--accent-glow)" : "var(--bg-2)",
-                    border: `1px solid ${selected ? "var(--accent-dim)" : isBest ? "var(--green)" : "var(--border)"}`,
+                    border: `1px solid ${selected ? "var(--accent-dim)" : "var(--border)"}`,
                     transition: "all 0.1s",
-                    display: "flex",
-                    alignItems: "center",
-                    justifyContent: "space-between",
-                    gap: "8px",
                   }}
                 >
-                  <div style={{ flex: 1, minWidth: 0 }}>
-                    {/* Row 1: name + price */}
-                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: "8px" }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: "8px" }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: "6px", minWidth: 0 }}>
                       <div style={{ fontFamily: "var(--font-mono)", fontSize: "11px", color: selected ? "var(--accent-bright)" : "var(--text-primary)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                         {gpu.displayName}
                       </div>
-                      <div style={{ fontFamily: "var(--font-mono)", fontSize: "10px", color: selected ? "var(--accent-bright)" : "var(--text-muted)", flexShrink: 0 }}>
-                        {gpu.memoryInGb}GB{priceStr ? ` · ${priceStr}` : ""}
-                      </div>
+                      {isBestValue && (
+                        <span style={{ fontFamily: "var(--font-mono)", fontSize: "9px", letterSpacing: "0.06em", color: "var(--green)", background: "var(--green-dim)", border: "1px solid var(--green)", borderRadius: "3px", padding: "1px 5px", flexShrink: 0 }}>
+                          BEST VALUE
+                        </span>
+                      )}
                     </div>
-                    {/* Row 2: badges (only when present) */}
-                    {(isBest || config.networkVolumeId) && (
-                      <div style={{ display: "flex", gap: "5px", marginTop: "4px", flexWrap: "wrap" }}>
-                        {isBest && (
-                          <div style={{ fontFamily: "var(--font-mono)", fontSize: "9px", color: "var(--green)", letterSpacing: "0.06em", textTransform: "uppercase", padding: "1px 5px", borderRadius: "3px", background: "rgba(74,154,106,0.12)", border: "1px solid var(--green)" }}>
-                            best value · from ~${bestValueGpuId.cost.toFixed(2)} est. total
-                          </div>
-                        )}
-                        {config.networkVolumeId && (
-                          dcGpuIds.has(gpu.id) ? (
-                            <div style={{ fontFamily: "var(--font-mono)", fontSize: "9px", color: "var(--green)", padding: "1px 5px", borderRadius: "3px", background: "rgba(74,154,106,0.10)", border: "1px solid rgba(74,154,106,0.3)" }}>
-                              cached
-                            </div>
-                          ) : (
-                            <div style={{ fontFamily: "var(--font-mono)", fontSize: "9px", color: "var(--text-muted)", padding: "1px 5px", borderRadius: "3px", background: "var(--bg-3)", border: "1px solid var(--border)" }}>
-                              ↓ dl model
-                            </div>
-                          )
-                        )}
-                      </div>
-                    )}
+                    <div style={{ fontFamily: "var(--font-mono)", fontSize: "10px", color: selected ? "var(--accent-bright)" : "var(--text-secondary)", flexShrink: 0 }}>
+                      {gpu.memoryInGb}GB
+                    </div>
                   </div>
+                  {showPrice && (
+                    <div style={{ display: "flex", gap: "10px", marginTop: "3px" }}>
+                      {securePrice > 0 && (
+                        <span style={{ fontFamily: "var(--font-mono)", fontSize: "10px", color: selected ? "var(--accent-bright)" : "var(--text-secondary)" }}>
+                          secure ${securePrice.toFixed(3)}/hr
+                        </span>
+                      )}
+                      {communityPrice > 0 && (
+                        <span style={{ fontFamily: "var(--font-mono)", fontSize: "10px", color: selected ? "var(--accent-bright)" : "var(--text-secondary)" }}>
+                          community ${communityPrice.toFixed(3)}/hr
+                        </span>
+                      )}
+                    </div>
+                  )}
                 </div>
               );
-            })}
+              });
+            })()}
           </div>
 
           {/* Cloud type */}
@@ -1484,7 +1557,7 @@ export default function RunPodLauncher() {
                 >{t}</button>
               ))}
             </div>
-            <div style={{ fontFamily: "var(--font-body)", fontStyle: "italic", fontSize: "11px", color: "var(--text-muted)", marginTop: "4px" }}>
+            <div style={{ fontFamily: "var(--font-body)", fontStyle: "italic", fontSize: "11px", color: "var(--text-secondary)", marginTop: "4px" }}>
               ALL = cheapest available (community first). SECURE = guaranteed. COMMUNITY = spot only.
             </div>
           </div>
@@ -1548,7 +1621,7 @@ export default function RunPodLauncher() {
                 </span>
               )}
             </div>
-            <div style={{ fontFamily: "var(--font-body)", fontStyle: "italic", fontSize: "11px", color: "var(--text-muted)", marginTop: "3px", marginBottom: "4px" }}>
+            <div style={{ fontFamily: "var(--font-body)", fontStyle: "italic", fontSize: "11px", color: "var(--text-secondary)", marginTop: "3px", marginBottom: "4px" }}>
               Enable for NoobAI-XL and other v-pred models. Standard SDXL uses epsilon — leave off.
             </div>
             {/* Optimizer selector */}
@@ -1579,7 +1652,7 @@ export default function RunPodLauncher() {
               <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "8px", marginBottom: "6px" }}>
                 {config.optimizer === "Prodigy" && (
                   <div>
-                    <div style={{ fontFamily: "var(--font-mono)", fontSize: "9px", color: "var(--text-muted)", marginBottom: "3px", letterSpacing: "0.06em", textTransform: "uppercase" }}>D Coef</div>
+                    <div style={{ fontFamily: "var(--font-mono)", fontSize: "9px", color: "var(--text-secondary)", marginBottom: "3px", letterSpacing: "0.06em", textTransform: "uppercase" }}>D Coef</div>
                     <input
                       type="number"
                       step="0.1"
@@ -1589,11 +1662,11 @@ export default function RunPodLauncher() {
                       disabled={settings.ezMode}
                       title={settings.ezMode ? "Disable EZ Mode to edit" : undefined}
                     />
-                    <div style={{ fontFamily: "var(--font-body)", fontSize: "10px", color: "var(--text-muted)", marginTop: "2px" }}>LR scale (0.5 = slow, 2 = fast)</div>
+                    <div style={{ fontFamily: "var(--font-body)", fontSize: "10px", color: "var(--text-secondary)", marginTop: "2px" }}>LR scale (0.5 = slow, 2 = fast)</div>
                   </div>
                 )}
                 <div>
-                  <div style={{ fontFamily: "var(--font-mono)", fontSize: "9px", color: "var(--text-muted)", marginBottom: "3px", letterSpacing: "0.06em", textTransform: "uppercase" }}>Weight Decay</div>
+                  <div style={{ fontFamily: "var(--font-mono)", fontSize: "9px", color: "var(--text-secondary)", marginBottom: "3px", letterSpacing: "0.06em", textTransform: "uppercase" }}>Weight Decay</div>
                   <input
                     type="number"
                     step="0.001"
@@ -1630,7 +1703,7 @@ export default function RunPodLauncher() {
                   : null;
                 return (
                   <div key={key}>
-                    <div style={{ fontFamily: "var(--font-mono)", fontSize: "9px", color: "var(--text-muted)", marginBottom: "3px", letterSpacing: "0.06em", textTransform: "uppercase" }}>{label}</div>
+                    <div style={{ fontFamily: "var(--font-mono)", fontSize: "9px", color: "var(--text-secondary)", marginBottom: "3px", letterSpacing: "0.06em", textTransform: "uppercase" }}>{label}</div>
                     <input
                       type={type}
                       step={key === "noiseOffset" ? "0.001" : undefined}
@@ -1700,7 +1773,7 @@ export default function RunPodLauncher() {
                   {label}
                 </label>
               ))}
-              <span style={{ fontFamily: "var(--font-mono)", fontSize: "9px", color: "var(--text-muted)", letterSpacing: "0.04em" }}>auto-download on complete</span>
+              <span style={{ fontFamily: "var(--font-mono)", fontSize: "9px", color: "var(--text-secondary)", letterSpacing: "0.04em" }}>auto-download on complete</span>
               <label style={{ display: "flex", alignItems: "center", gap: "5px", cursor: "pointer", fontFamily: "var(--font-body)", fontSize: "11px", color: autoTerminate ? "var(--text)" : "var(--text-muted)", marginLeft: "8px" }}>
                 <input
                   type="checkbox"
@@ -1713,7 +1786,7 @@ export default function RunPodLauncher() {
             </div>
 
             <div style={{ marginTop: "12px" }}>
-              <div style={{ fontFamily: "var(--font-mono)", fontSize: "9px", color: "var(--text-muted)", marginBottom: "4px", letterSpacing: "0.06em", textTransform: "uppercase" }}>
+              <div style={{ fontFamily: "var(--font-mono)", fontSize: "9px", color: "var(--text-secondary)", marginBottom: "4px", letterSpacing: "0.06em", textTransform: "uppercase" }}>
                 Base Model — Search <span style={{ opacity: 0.6 }}>(CivitAI → HuggingFace)</span>
               </div>
               {/* Search row */}
@@ -1766,13 +1839,13 @@ export default function RunPodLauncher() {
                           {result.source === "huggingface" ? "HF" : "CivitAI"}
                         </div>
                       </div>
-                      <div style={{ fontFamily: "var(--font-mono)", fontSize: "9px", color: "var(--text-muted)", marginTop: "2px" }}>{result.sublabel}</div>
+                      <div style={{ fontFamily: "var(--font-mono)", fontSize: "9px", color: "var(--text-secondary)", marginTop: "2px" }}>{result.sublabel}</div>
                     </div>
                   ))}
                 </div>
               )}
               {modelOpen && modelResults.length === 0 && (
-                <div style={{ marginTop: "4px", fontFamily: "var(--font-mono)", fontSize: "10px", color: "var(--text-muted)", padding: "6px 0" }}>No results.</div>
+                <div style={{ marginTop: "4px", fontFamily: "var(--font-mono)", fontSize: "10px", color: "var(--text-secondary)", padding: "6px 0" }}>No results.</div>
               )}
               </div>{/* end modelDropdownRef */}
               {/* Selected model display */}
@@ -1800,7 +1873,7 @@ export default function RunPodLauncher() {
               </div>
             </div>
             <div style={{ marginTop: "8px" }}>
-              <div style={{ fontFamily: "var(--font-mono)", fontSize: "9px", color: "var(--text-muted)", marginBottom: "3px", letterSpacing: "0.06em", textTransform: "uppercase" }}>
+              <div style={{ fontFamily: "var(--font-mono)", fontSize: "9px", color: "var(--text-secondary)", marginBottom: "3px", letterSpacing: "0.06em", textTransform: "uppercase" }}>
                 Base Model — Local Path <span style={{ opacity: 0.6 }}>(fallback, slow for large files)</span>
               </div>
               <div style={{ display: "flex", gap: "6px" }}>
@@ -1832,7 +1905,7 @@ export default function RunPodLauncher() {
               borderRadius: "6px",
               fontFamily: "var(--font-mono)",
               fontSize: "11px",
-              color: "#d47070",
+              color: "var(--red-bright)",
               lineHeight: 1.5,
             }}>
               <div style={{ marginBottom: "8px" }}>
@@ -1944,38 +2017,41 @@ export default function RunPodLauncher() {
               <div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
                 <div style={{
                   width: "8px", height: "8px", borderRadius: "50%",
-                  background: pod.status === "RUNNING" && jupyterUrl ? "var(--green)" : pod.status === "EXITED" ? "var(--red)" : "var(--accent)",
+                  background: pod.status === "RUNNING" && sshHost ? "var(--green)" : pod.status === "EXITED" ? "var(--red)" : "var(--accent)",
                   flexShrink: 0,
                   ...(pod.status === "RUNNING" ? { animation: "pulse 2s infinite" } : {}),
                 }} />
                 <div style={{ flex: 1 }}>
                   <div style={{ fontFamily: "var(--font-display)", fontSize: "13px", fontWeight: 700, color: "var(--text-primary)" }}>
                     Pod {pod.id.slice(0, 8)}… — <span style={{ color: pod.status === "RUNNING" ? "var(--green)" : "var(--text-secondary)" }}>
-                      {pod.status === "RUNNING" && !jupyterUrl ? "LAUNCHING" : pod.status}
+                      {pod.status === "RUNNING" && !sshHost ? "LAUNCHING" : pod.status}
                     </span>
                   </div>
-                  <div style={{ fontFamily: "var(--font-mono)", fontSize: "10px", color: "var(--text-muted)" }}>
+                  <div style={{ fontFamily: "var(--font-mono)", fontSize: "10px", color: "var(--text-secondary)" }}>
                     ${pod.costPerHr?.toFixed(3) ?? "?"}/hr
-                    {pod.runtime?.uptimeInSeconds ? ` · ${Math.floor(pod.runtime.uptimeInSeconds / 60)}m uptime` : ""}
+                    {podUptimeSec != null && podUptimeSec > 0
+                      ? ` · ${podUptimeSec >= 3600 ? `${Math.floor(podUptimeSec / 3600)}h ${Math.floor((podUptimeSec % 3600) / 60)}m` : `${Math.floor(podUptimeSec / 60)}m ${podUptimeSec % 60}s`}`
+                      : ""}
+                    {podUptimeSec != null && podUptimeSec > 0 && pod.costPerHr
+                      ? ` · ~$${(pod.costPerHr * podUptimeSec / 3600).toFixed(3)} spent`
+                      : ""}
                     {polling ? " · polling every 15s" : ""}
                   </div>
                 </div>
                 <div style={{ display: "flex", gap: "6px", flexShrink: 0 }}>
-                  {jupyterUrl && (
-                    <button
-                      onClick={() => open(jupyterUrl)}
-                      className="btn-primary"
-                      style={{ padding: "5px 12px", fontSize: "11px", display: "flex", alignItems: "center", gap: "5px" }}
-                      title={jupyterUrl}
+                  {sshHost && sshPort && (
+                    <div
+                      style={{ fontFamily: "var(--font-mono)", fontSize: "10px", color: "var(--text-muted)", cursor: "pointer", padding: "5px 8px", borderRadius: "4px", background: "var(--bg-3)", border: "1px solid var(--border)" }}
+                      onClick={() => navigator.clipboard.writeText(`ssh -p ${sshPort} root@${sshHost}`)}
+                      title="Click to copy SSH command"
                     >
-                      <ExternalLink size={11} />
-                      Open Jupyter
-                    </button>
+                      ssh root@{sshHost} -p {sshPort}
+                    </div>
                   )}
                   <button
                     onClick={terminateCurrentPod}
                     disabled={terminating}
-                    style={{ padding: "5px 12px", fontSize: "11px", display: "flex", alignItems: "center", gap: "5px", background: "var(--red-dim)", border: "1px solid var(--red)", color: "#d47070", borderRadius: "4px", cursor: terminating ? "default" : "pointer", opacity: terminating ? 0.5 : 1, fontFamily: "var(--font-display)", fontWeight: 600, letterSpacing: "0.04em" }}
+                    style={{ padding: "5px 12px", fontSize: "11px", display: "flex", alignItems: "center", gap: "5px", background: "var(--red-dim)", border: "1px solid var(--red)", color: "var(--red-bright)", borderRadius: "4px", cursor: terminating ? "default" : "pointer", opacity: terminating ? 0.5 : 1, fontFamily: "var(--font-display)", fontWeight: 600, letterSpacing: "0.04em" }}
                   >
                     <Square size={11} />
                     {terminating ? "Terminating…" : "Terminate"}
@@ -2043,7 +2119,7 @@ export default function RunPodLauncher() {
                     return (
                       <>
                         <div style={{ fontFamily: "var(--font-mono)", fontSize: "32px", fontWeight: 700, color: "var(--accent-bright)", letterSpacing: "-0.02em" }}>
-                          {cur} <span style={{ fontSize: "18px", color: "var(--text-muted)", fontWeight: 400 }}>/ {total}</span>
+                          {cur} <span style={{ fontSize: "18px", color: "var(--text-secondary)", fontWeight: 400 }}>/ {total}</span>
                         </div>
                         <div style={{ width: "100%", maxWidth: "360px", height: "6px", background: "var(--bg-3)", borderRadius: "3px", overflow: "hidden" }}>
                           <div style={{ width: `${pct}%`, height: "100%", background: "var(--accent)", transition: "width 3s ease", borderRadius: "3px" }} />
@@ -2053,17 +2129,25 @@ export default function RunPodLauncher() {
                     );
                   }
                   const lastLine = [...logs].reverse().find(l => l.trim());
+                  const isTraining = pipelineStep === 3 && !trainingHalted && !downloadFailed;
                   return (
-                    <div style={{ fontFamily: "var(--font-mono)", fontSize: "12px", color: "var(--text-muted)", textAlign: "center" }}>
-                      {lastLine ?? (uploadStatus ?? "Ready. Package your dataset to begin.")}
-                    </div>
+                    <>
+                      <div style={{ fontFamily: "var(--font-mono)", fontSize: "12px", color: "var(--text-secondary)", textAlign: "center" }}>
+                        {lastLine ?? (uploadStatus ?? "Ready. Package your dataset to begin.")}
+                      </div>
+                      {isTraining && (
+                        <div style={{ fontFamily: "var(--font-body)", fontSize: "13px", color: "var(--text-secondary)", textAlign: "center", fontStyle: "italic", opacity: 0.7 }}>
+                          🧻 Don't Panic — it's supposed to be slow
+                        </div>
+                      )}
+                    </>
                   );
                 })()}
               </div>
             ) : (
             <div ref={logScrollRef} style={{ flex: 1, overflow: "auto", padding: "0 20px 16px" }}>
               {logs.length === 0 && !uploadStatus && (
-                <div style={{ color: "var(--text-muted)" }}>
+                <div style={{ color: "var(--text-secondary)" }}>
                   Ready. Package your dataset to begin.
                 </div>
               )}
@@ -2074,7 +2158,7 @@ export default function RunPodLauncher() {
                   {line || <br />}
                 </div>
               ))}
-              {pipelineStep === 3 && jupyterUrl && !downloadFailed && !trainingHalted && (
+              {pipelineStep === 3 && sshHost && !downloadFailed && !trainingHalted && (
                 <div style={{
                   display: "flex", alignItems: "center", gap: "10px", marginTop: "8px",
                   padding: "7px 10px", borderRadius: "5px",
@@ -2089,13 +2173,13 @@ export default function RunPodLauncher() {
                     className="btn-ghost"
                     disabled={!!uploadStatus}
                     style={{ padding: "3px 10px", fontSize: "10px", color: "var(--accent-bright)", borderColor: "var(--accent-dim)" }}
-                    onClick={() => downloadOutputs(jupyterUrl)}
+                    onClick={() => downloadOutputs(sshHost, sshPort, settings.sshKeyPath)}
                   >
                     Download LoRA
                   </button>
                 </div>
               )}
-              {downloadFailed && jupyterUrl && (
+              {downloadFailed && sshHost && (
                 <div style={{
                   display: "flex", alignItems: "center", gap: "10px", marginTop: "8px",
                   padding: "7px 10px", borderRadius: "5px",
@@ -2103,21 +2187,21 @@ export default function RunPodLauncher() {
                   background: "rgba(212,112,112,0.12)", border: "1px solid rgba(212,112,112,0.3)",
                   backdropFilter: "blur(4px)",
                 }}>
-                  <AlertTriangle size={12} style={{ color: "#d47070", flexShrink: 0 }} />
-                  <span style={{ fontFamily: "var(--font-mono)", fontSize: "10px", color: "#d47070", flex: 1 }}>
+                  <AlertTriangle size={12} style={{ color: "var(--red-bright)", flexShrink: 0 }} />
+                  <span style={{ fontFamily: "var(--font-mono)", fontSize: "10px", color: "var(--red-bright)", flex: 1 }}>
                     Download failed — training output still on pod
                   </span>
                   <button
                     className="btn-ghost"
                     disabled={!!uploadStatus}
                     style={{ padding: "3px 10px", fontSize: "10px", color: "var(--accent-bright)", borderColor: "var(--accent-dim)" }}
-                    onClick={() => downloadOutputs(jupyterUrl)}
+                    onClick={() => downloadOutputs(sshHost, sshPort, settings.sshKeyPath)}
                   >
                     Retry Download
                   </button>
                 </div>
               )}
-              {trainingHalted && jupyterUrl && (
+              {trainingHalted && sshHost && (
                 <div style={{
                   display: "flex", alignItems: "center", gap: "10px", marginTop: "8px",
                   padding: "7px 10px", borderRadius: "5px",
@@ -2125,14 +2209,14 @@ export default function RunPodLauncher() {
                   background: "rgba(212,112,112,0.12)", border: "1px solid rgba(212,112,112,0.3)",
                   backdropFilter: "blur(4px)",
                 }}>
-                  <AlertTriangle size={12} style={{ color: "#d47070", flexShrink: 0 }} />
-                  <span style={{ fontFamily: "var(--font-mono)", fontSize: "10px", color: "#d47070", flex: 1 }}>
+                  <AlertTriangle size={12} style={{ color: "var(--red-bright)", flexShrink: 0 }} />
+                  <span style={{ fontFamily: "var(--font-mono)", fontSize: "10px", color: "var(--red-bright)", flex: 1 }}>
                     Training halted
                   </span>
                   <button
                     className="btn-ghost"
                     style={{ padding: "3px 10px", fontSize: "10px", color: "var(--accent-bright)", borderColor: "var(--accent-dim)" }}
-                    onClick={() => { setTrainingHalted(false); checkAndResume(jupyterUrl); startPolling(pod?.id ?? ""); }}
+                    onClick={() => { setTrainingHalted(false); checkAndResume(sshHost, sshPort, settings.sshKeyPath); startPolling(pod?.id ?? ""); }}
                   >
                     Retry
                   </button>
