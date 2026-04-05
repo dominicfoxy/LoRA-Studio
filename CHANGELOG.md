@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+---
+
+## [v1.1.0-alpha]
+
 - **Remove force-download button** — the "Force-start download" escape hatch during training is no longer needed now that completion detection and reconnect are reliable. The "Retry Download" button (shown on actual download failures) remains.
 - **Remove post-launch diagnostic dump** — the 8s SSH diagnostic after training launch was useful for debugging but redundant now that the log filter shows model loading progress. Removed to reduce noise.
 - **Fix log errors after pod termination** — poll intervals (pod status, log polling, SSH wait) were cleared after `terminatePod()` returned, but the async gap let them fire one more time against a dying pod, spamming SSH errors into the log. Now cleared before the terminate call in both auto-terminate and manual terminate paths.
