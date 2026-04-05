@@ -7,7 +7,7 @@
   --bg-4: #2e2e33;
 
   /* Borders */
-  --border: #2e2e33;
+  --border: #35353b;
   --border-light: #3a3a40;
 
   /* Text */
@@ -118,6 +118,9 @@ button {
   border: 1px solid var(--red);
 }
 .btn-danger:hover { background: var(--red); color: var(--text-primary); }
+
+.btn-icon { background: none; border: 1px solid var(--border); border-radius: 4px; padding: 6px; color: var(--text-muted); display: inline-flex; align-items: center; justify-content: center; transition: all 0.15s; }
+.btn-icon:hover:not(:disabled) { border-color: var(--accent-dim); color: var(--accent-bright); }
 
 .tag {
   display: inline-flex;

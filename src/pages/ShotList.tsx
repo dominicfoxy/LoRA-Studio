@@ -73,14 +73,14 @@ function CategoryPanel({
   };
 
   return (
-    <div style={{ border: "1px solid var(--border)", borderRadius: "8px", marginBottom: "12px", overflow: "hidden" }}>
+    <div style={{ border: "1px solid var(--border)", borderRadius: "8px", marginBottom: "12px" }}>
       {/* Header */}
       <div
         onClick={() => setCollapsed(!collapsed)}
         style={{
           display: "flex", alignItems: "center", gap: "10px",
           padding: "10px 16px", cursor: "pointer", background: "var(--bg-3)",
-          userSelect: "none",
+          userSelect: "none", borderRadius: "7px 7px 0 0",
         }}
       >
         <div style={{
@@ -167,27 +167,42 @@ function CategoryPanel({
 }
 
 // ── Inline LoRA Adder ─────────────────────────────────────────────────────────
-function InlineLoraAdder({ attached, loraFiles, onAdd, onRemove }: {
+function InlineLoraAdder({ attached, loraFiles, onAdd, onRemove, onUpdate }: {
   attached: string[];
   loraFiles: { name: string; path: string; dir: string }[];
   onAdd: (tag: string) => void;
   onRemove: (tag: string) => void;
+  onUpdate: (oldTag: string, newTag: string) => void;
 }) {
   const [open, setOpen] = useState(false);
   const [filter, setFilter] = useState("");
-  const [weights, setWeights] = useState<Record<string, number>>({});
+  const [weights, setWeights] = useState<Record<string, string>>({});
+  const [editingTag, setEditingTag] = useState<string | null>(null);
+  const [editValue, setEditValue] = useState("");
 
-  const getWeight = (name: string) => weights[name] ?? 0.8;
+  const getWeight = (name: string): number => { const v = parseFloat(weights[name]); return isNaN(v) ? 0.8 : v; };
+  const getRawWeight = (name: string): string => weights[name] ?? "0.8";
   const attachedNames = new Set(attached.map((t) => t.replace(/<lora:([^:>]+):[^>]+>/, "$1")));
   const filtered = loraFiles.filter((l) =>
     (l.name.toLowerCase().includes(filter.toLowerCase()) || l.dir.toLowerCase().includes(filter.toLowerCase()))
     && !attachedNames.has(l.name)
   );
 
+  const commitEdit = (tag: string) => {
+    const name = tag.replace(/<lora:([^:>]+):[^>]+>/, "$1");
+    const v = parseFloat(editValue);
+    const weight = isNaN(v) || v <= 0 ? parseFloat(tag.replace(/<lora:[^:>]+:([^>]+)>/, "$1")) || 0.8 : v;
+    const newTag = `<lora:${name}:${weight}>`;
+    if (newTag !== tag) onUpdate(tag, newTag);
+    setEditingTag(null);
+  };
+
   return (
     <div style={{ display: "flex", flexWrap: "wrap", gap: "4px", alignItems: "center", paddingLeft: "26px", marginTop: "4px" }}>
       {attached.map((tag) => {
         const name = tag.replace(/<lora:([^:>]+):[^>]+>/, "$1");
+        const weight = tag.replace(/<lora:[^:>]+:([^>]+)>/, "$1");
+        const isEditing = editingTag === tag;
         return (
           <div key={tag} style={{
             display: "inline-flex", alignItems: "center", gap: "3px",
@@ -196,6 +211,23 @@ function InlineLoraAdder({ attached, loraFiles, onAdd, onRemove }: {
             fontFamily: "var(--font-mono)", fontSize: "10px", color: "var(--accent-bright)",
           }}>
             {name}
+            {isEditing ? (
+              <input
+                autoFocus
+                type="number" min={0.1} max={2.0} step={0.1}
+                value={editValue}
+                onChange={(e) => setEditValue(e.target.value)}
+                onBlur={() => commitEdit(tag)}
+                onKeyDown={(e) => { if (e.key === "Enter") commitEdit(tag); if (e.key === "Escape") setEditingTag(null); }}
+                style={{ width: "36px", padding: "0 2px", fontSize: "10px", textAlign: "center", background: "var(--bg-1)", border: "1px solid var(--accent-dim)", borderRadius: "2px", color: "var(--accent-bright)", fontFamily: "var(--font-mono)" }}
+              />
+            ) : (
+              <span
+                onClick={() => { setEditingTag(tag); setEditValue(weight); }}
+                style={{ cursor: "pointer", opacity: 0.7, borderBottom: "1px dashed var(--accent-dim)" }}
+                title="Click to edit weight"
+              >{weight}</span>
+            )}
             <button onClick={() => onRemove(tag)} style={{ background: "none", border: "none", cursor: "pointer", color: "var(--accent-bright)", padding: "0 0 0 2px", fontSize: "13px", lineHeight: 1, display: "flex", alignItems: "center" }}>×</button>
           </div>
         );
@@ -229,8 +261,9 @@ function InlineLoraAdder({ attached, loraFiles, onAdd, onRemove }: {
                     </div>
                     <input
                       type="number" min={0.1} max={2.0} step={0.1}
-                      value={getWeight(lora.name)}
-                      onChange={(e) => setWeights((w) => ({ ...w, [lora.name]: parseFloat(e.target.value) || 0.8 }))}
+                      value={getRawWeight(lora.name)}
+                      onChange={(e) => setWeights((w) => ({ ...w, [lora.name]: e.target.value }))}
+                      onBlur={(e) => { const v = parseFloat(e.target.value); setWeights((w) => ({ ...w, [lora.name]: isNaN(v) ? "0.8" : String(v) })); }}
                       style={{ width: "44px", padding: "2px 3px", fontSize: "10px", textAlign: "center" }}
                     />
                     <button
@@ -275,10 +308,10 @@ function OutfitCategoryPanel({
   };
 
   return (
-    <div style={{ border: "1px solid var(--border)", borderRadius: "8px", marginBottom: "12px", overflow: "hidden" }}>
+    <div style={{ border: "1px solid var(--border)", borderRadius: "8px", marginBottom: "12px" }}>
       <div
         onClick={() => setCollapsed(!collapsed)}
-        style={{ display: "flex", alignItems: "center", gap: "10px", padding: "10px 16px", cursor: "pointer", background: "var(--bg-3)", userSelect: "none" }}
+        style={{ display: "flex", alignItems: "center", gap: "10px", padding: "10px 16px", cursor: "pointer", background: "var(--bg-3)", userSelect: "none", borderRadius: "7px 7px 0 0" }}
       >
         <div style={{ fontFamily: "var(--font-mono)", fontSize: "12px", color: "#a0c878", textTransform: "uppercase", letterSpacing: "0.08em", fontWeight: 700 }}>
           Outfits / Clothing
@@ -325,6 +358,7 @@ function OutfitCategoryPanel({
                   loraFiles={loraFiles}
                   onAdd={(tag) => update(i, { loras: [...(v.loras ?? []), tag] })}
                   onRemove={(tag) => update(i, { loras: (v.loras ?? []).filter((l) => l !== tag) })}
+                  onUpdate={(oldTag, newTag) => update(i, { loras: (v.loras ?? []).map((l) => l === oldTag ? newTag : l) })}
                 />
               )}
             </div>
@@ -559,10 +593,10 @@ function SettingsPanel() {
   }, [ezMode]);
 
   return (
-    <div style={{ border: "1px solid var(--border)", borderRadius: "8px", marginBottom: "12px", overflow: "hidden" }}>
+    <div style={{ border: "1px solid var(--border)", borderRadius: "8px", marginBottom: "12px" }}>
       <div
         onClick={() => setCollapsed(!collapsed)}
-        style={{ display: "flex", alignItems: "center", gap: "10px", padding: "10px 16px", cursor: "pointer", background: "var(--bg-3)", userSelect: "none" }}
+        style={{ display: "flex", alignItems: "center", gap: "10px", padding: "10px 16px", cursor: "pointer", background: "var(--bg-3)", userSelect: "none", borderRadius: "7px 7px 0 0" }}
       >
         <div style={{ fontFamily: "var(--font-mono)", fontSize: "10px", color: "var(--text-secondary)", textTransform: "uppercase", letterSpacing: "0.12em", fontWeight: 700 }}>Settings</div>
         {ezMode && <div style={{ fontFamily: "var(--font-mono)", fontSize: "9px", color: "var(--accent-bright)", background: "var(--accent-glow)", border: "1px solid var(--accent-dim)", borderRadius: "3px", padding: "1px 6px", letterSpacing: "0.1em" }}>EZ</div>}
@@ -706,8 +740,8 @@ function PoseCategoryPanel({
   };
 
   return (
-    <div style={{ border: "1px solid var(--border)", borderRadius: "8px", marginBottom: "12px", overflow: "hidden" }}>
-      <div onClick={() => setCollapsed(!collapsed)} style={{ display: "flex", alignItems: "center", gap: "10px", padding: "10px 16px", cursor: "pointer", background: "var(--bg-3)", userSelect: "none" }}>
+    <div style={{ border: "1px solid var(--border)", borderRadius: "8px", marginBottom: "12px" }}>
+      <div onClick={() => setCollapsed(!collapsed)} style={{ display: "flex", alignItems: "center", gap: "10px", padding: "10px 16px", cursor: "pointer", background: "var(--bg-3)", userSelect: "none", borderRadius: "7px 7px 0 0" }}>
         <div style={{ fontFamily: "var(--font-mono)", fontSize: "12px", color: "var(--accent-bright)", textTransform: "uppercase", letterSpacing: "0.08em", fontWeight: 700 }}>Poses / Framing</div>
         <div style={{ fontFamily: "var(--font-mono)", fontSize: "12px", color: "var(--text-secondary)" }}>{values.length} variant{values.length !== 1 ? "s" : ""}</div>
         <div style={{ flex: 1 }} />
@@ -728,6 +762,7 @@ function PoseCategoryPanel({
                   loraFiles={loraFiles}
                   onAdd={(tag) => update(i, { loras: [...(v.loras ?? []), tag] })}
                   onRemove={(tag) => update(i, { loras: (v.loras ?? []).filter((l) => l !== tag) })}
+                  onUpdate={(oldTag, newTag) => update(i, { loras: (v.loras ?? []).map((l) => l === oldTag ? newTag : l) })}
                 />
               )}
             </div>
@@ -776,10 +811,10 @@ function DynamicPromptsPanel({
   };
 
   return (
-    <div style={{ border: "1px solid var(--border)", borderRadius: "8px", marginTop: "12px", overflow: "hidden" }}>
+    <div style={{ border: "1px solid var(--border)", borderRadius: "8px", marginTop: "12px" }}>
       <div
         onClick={() => setOpen(!open)}
-        style={{ display: "flex", alignItems: "center", gap: "10px", padding: "10px 16px", cursor: "pointer", background: "var(--bg-3)", userSelect: "none" }}
+        style={{ display: "flex", alignItems: "center", gap: "10px", padding: "10px 16px", cursor: "pointer", background: "var(--bg-3)", userSelect: "none", borderRadius: "7px 7px 0 0" }}
       >
         <div style={{ fontFamily: "var(--font-mono)", fontSize: "10px", color: "var(--text-secondary)", textTransform: "uppercase", letterSpacing: "0.12em", fontWeight: 700 }}>
           Dynamic Prompts Export

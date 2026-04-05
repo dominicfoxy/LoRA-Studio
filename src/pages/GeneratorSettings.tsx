@@ -105,7 +105,7 @@ export default function GeneratorSettings() {
 
   useEffect(() => {
     if (ezMode) {
-      updateGeneration({ steps: 20, cfgScale: 7, samplerName: "DPM++ 2M", scheduler: "Karras" });
+      updateGeneration({ steps: 30, cfgScale: 7, samplerName: "Euler a", scheduler: "Automatic" });
     }
   }, [ezMode]);
 

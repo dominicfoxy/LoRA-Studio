@@ -8,7 +8,7 @@ import {
   listGpuTypes, fetchGpuPrices, createPod, getPod, terminatePod, listPods, getSshInfo,
   listNetworkVolumes, checkRunpodctl, installRunpodctl, setupSshKey,
   sshIsReady, sshRunCommand, sshUploadFile, sshDownloadFile,
-  RECOMMENDED_GPUS, KOHYA_POD_TEMPLATE, generateKohyaConfig, gpuTrainingFlags,
+  KOHYA_POD_TEMPLATE, generateKohyaConfig, gpuTrainingFlags, stepsPerSecForVram, isGpuCompatible,
   Pod, NetworkVolume, GpuPrice,
 } from "../lib/runpod";
 
@@ -45,7 +45,7 @@ let _uploadInProgress = false;
 let _connectedPodId = "";
 
 export default function RunPodLauncher() {
-  const { character, images, settings, setSettings, training: config, updateTraining: setConfig, runpodLogs: logs, addRunpodLog, clearRunpodLogs, runpodActivePodId, runpodActiveSshHost, runpodActiveSshPort, setRunpodActivePodId, setRunpodActiveSshHost, setRunpodActiveSshPort } = useStore();
+  const { character, images, settings, setSettings, training: config, updateTraining: setConfig, runpodLogs: logs, addRunpodLog, clearRunpodLogs, runpodActivePodId, runpodActiveSshHost, runpodActiveSshPort, setRunpodActivePodId, setRunpodActiveSshHost, setRunpodActiveSshPort, runpodUptimeSec: storeUptimeSec, runpodCostPerHr: storeCostPerHr, setRunpodUptimeSec: setStoreUptimeSec, setRunpodCostPerHr: setStoreCostPerHr } = useStore();
   const [phase, setPhase] = useState<Phase>(runpodActivePodId ? "training" : "config");
   const [pipelineStep, setPipelineStep] = useState(runpodActivePodId ? 0 : -1);
   const [pod, setPodLocal] = useState<Pod | null>(null);
@@ -63,6 +63,7 @@ export default function RunPodLauncher() {
     setRunpodActiveSshHost(host); setRunpodActiveSshPort(port);
   };
   const [liveGpuTypes, setLiveGpuTypes] = useState<Array<{ id: string; displayName: string; memoryInGb: number }> | null>(null);
+  const liveGpuTypesRef = useRef(liveGpuTypes);
   const [livePrices, setLivePrices] = useState<Map<string, GpuPrice> | null>(null);
   const [fetchingPrices, setFetchingPrices] = useState(false);
   const [runpodctlStatus, setRunpodctlStatus] = useState<"checking" | "missing" | "installing" | "ready">("checking");
@@ -90,8 +91,7 @@ export default function RunPodLauncher() {
   const [modelLoading, setModelLoading] = useState(false);
   const [modelOpen, setModelOpen] = useState(false);
   const [modelSelected, setModelSelected] = useState("");
-  const [podUptimeSec, setPodUptimeSec] = useState<number | null>(null);
-  const podUptimeRef = useRef<number | null>(null);
+  const podUptimeRef = useRef<number | null>(storeUptimeSec);
   const uptimeIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const [logCopied, setLogCopied] = useState(false);
   const [commandCopied, setCommandCopied] = useState(false);
@@ -114,14 +114,14 @@ export default function RunPodLauncher() {
     if (podStatus === "RUNNING") {
       if (polledUptime != null && polledUptime > 0) {
         podUptimeRef.current = polledUptime;
-        setPodUptimeSec(polledUptime);
+        setStoreUptimeSec(polledUptime);
       } else if (podUptimeRef.current == null) {
         podUptimeRef.current = 0;
-        setPodUptimeSec(0);
+        setStoreUptimeSec(0);
       }
     } else {
       podUptimeRef.current = null;
-      setPodUptimeSec(null);
+      setStoreUptimeSec(null);
     }
   }, [podStatus, polledUptime]);
 
@@ -133,7 +133,7 @@ export default function RunPodLauncher() {
     }
     uptimeIntervalRef.current = setInterval(() => {
       podUptimeRef.current = (podUptimeRef.current ?? 0) + 1;
-      setPodUptimeSec(podUptimeRef.current);
+      setStoreUptimeSec(podUptimeRef.current);
     }, 1000);
     return () => { if (uptimeIntervalRef.current) { clearInterval(uptimeIntervalRef.current); uptimeIntervalRef.current = null; } };
   }, [podStatus]);
@@ -227,7 +227,7 @@ export default function RunPodLauncher() {
         if (/training failed/i.test(logTail)) {
           log("Previous training failed — relaunching with current settings…");
           setUploadStatus(null);
-          const vram = RECOMMENDED_GPUS.find(g => g.id === config.gpuTypeId)?.vram ?? 0;
+          const vram = liveGpuTypes?.find(g => g.id === config.gpuTypeId)?.memoryInGb ?? 0;
           const gpuFlags = gpuTrainingFlags(vram, config.optimizer);
           launchTraining(host, port, keyPath, modelBaseName, gpuFlags);
           return;
@@ -341,13 +341,10 @@ export default function RunPodLauncher() {
     setFetchingVolumes(false);
   };
 
-  // Infer stepsPerSec for any GPU by VRAM tier (used for estimatedTime display)
   const stepsPerSecForGpu = (gpuId: string): number | null => {
-    const known = RECOMMENDED_GPUS.find((g) => g.id === gpuId);
-    if (known) return known.stepsPerSec;
     const live = liveGpuTypes?.find((g) => g.id === gpuId);
     if (!live) return null;
-    return live.memoryInGb >= 80 ? 0.70 : live.memoryInGb >= 40 ? 0.45 : live.memoryInGb >= 24 ? 0.25 : 0.15;
+    return stepsPerSecForVram(live.memoryInGb);
   };
 
   const resFactor = Math.pow(1024 / config.resolution, 1.5);
@@ -385,7 +382,11 @@ export default function RunPodLauncher() {
     try {
       const zipOut = `${character.outputDir}/${character.triggerWord}_dataset.zip`;
       const stopPackagingTicker = startTicker("Packaging dataset…");
-      await invoke("zip_dataset", { datasetDir: character.outputDir, outputZip: zipOut });
+      await invoke("zip_dataset", {
+        datasetDir: character.outputDir,
+        outputZip: zipOut,
+        includePaths: approved.map(img => img.path),
+      });
       stopPackagingTicker();
       setZipPath(zipOut);
       setExistingZip(true);
@@ -437,7 +438,7 @@ export default function RunPodLauncher() {
       const podSpec = {
         name: `lora-${character.triggerWord}-${Date.now()}`,
         ...KOHYA_POD_TEMPLATE,
-        imageName: settings.dockerImage || "ashleykza/kohya:latest",
+        imageName: settings.dockerImage || "ashleykza/kohya:25.2.1",
         gpuTypeId: config.gpuTypeId,
         cloudType: config.cloudType,
         containerDiskInGb: config.containerDiskInGb,
@@ -451,6 +452,7 @@ export default function RunPodLauncher() {
       setPod(newPod);
       log(`Pod created: ${newPod.id} (${newPod.status})`);
       log(`Cost: $${newPod.costPerHr?.toFixed(3) ?? "?"}/hr`);
+      if (newPod.costPerHr) setStoreCostPerHr(newPod.costPerHr);
       log(`Waiting for pod to start and trainer to launch…`);
       log(`Note: pod startup typically takes 3–6 minutes. If it seems stuck, it's probably fine — RunPod can be slow to provision.`);
       startPolling(newPod.id);
@@ -565,7 +567,7 @@ export default function RunPodLauncher() {
       (character.baseModel || "model.safetensors")
         .replace(/\s*\[.*?\]\s*$/, "").trim().split(/[\\/]/).pop() || "model.safetensors"
     );
-    const selectedVram = RECOMMENDED_GPUS.find(g => g.id === config.gpuTypeId)?.vram ?? 0;
+    const selectedVram = liveGpuTypes?.find(g => g.id === config.gpuTypeId)?.memoryInGb ?? 0;
     const previewGpuFlags = gpuTrainingFlags(selectedVram, config.optimizer);
     const isAdaptive = config.optimizer === "Prodigy" || config.optimizer === "DAdaptAdam";
     const networkAlpha = isAdaptive ? 1 : config.networkAlpha;
@@ -706,10 +708,17 @@ export default function RunPodLauncher() {
       : actualZipPath!.split("/").pop()!;
 
     try {
+      // Ensure GPU data is available — fetch inline if the async load hasn't finished
+      if (!liveGpuTypesRef.current && hasApiKey) {
+        try {
+          const gpus = await listGpuTypes(settings.runpodApiKey);
+          const sorted = [...gpus].sort((a, b) => b.memoryInGb - a.memoryInGb);
+          setLiveGpuTypes(sorted);
+          liveGpuTypesRef.current = sorted;
+        } catch { /* proceed with fallback */ }
+      }
       // Determine optimal training flags for the selected GPU
-      const selectedVram =
-        RECOMMENDED_GPUS.find(g => g.id === config.gpuTypeId)?.vram ??
-        (liveGpuTypes?.find(g => g.id === config.gpuTypeId)?.memoryInGb ?? 0);
+      const selectedVram = liveGpuTypesRef.current?.find(g => g.id === config.gpuTypeId)?.memoryInGb ?? 0;
       const gpuFlags = gpuTrainingFlags(selectedVram, config.optimizer);
       if (selectedVram > 0) {
         log(`GPU: ${config.gpuTypeId} (${selectedVram}GB VRAM) → batch=${gpuFlags.batchSize}, grad_ckpt=${gpuFlags.gradientCheckpointing}, cache_latents=${gpuFlags.cacheLatents}`);
@@ -873,22 +882,26 @@ export default function RunPodLauncher() {
       const podId = podRef.current?.id;
       const apiKey = apiKeyRef.current;
       if (autoTerminateRef.current && podId && apiKey) {
+        // Stop all polling BEFORE terminating — prevents SSH errors from racing the teardown
+        if (_podPollId) { clearInterval(_podPollId); _podPollId = null; }
+        if (_logPollId) { clearInterval(_logPollId); _logPollId = null; }
+        if (_sshWaitId) { clearInterval(_sshWaitId); _sshWaitId = null; }
         try {
           await terminatePod(apiKey, podId);
           log(`Pod terminated — billing stopped.`);
         } catch (err) {
           log(`Auto-terminate failed: ${err} — use the Terminate button to stop billing.`);
         } finally {
-          if (_podPollId) { clearInterval(_podPollId); _podPollId = null; }
-          if (_logPollId) { clearInterval(_logPollId); _logPollId = null; }
-          if (_sshWaitId) { clearInterval(_sshWaitId); _sshWaitId = null; }
           _connectedPodId = "";
           setPod(null);
+          setActivePods([]);
           setSshInfo("", 0);
           sshHostRef.current = "";
           setRunpodActivePodId("");
           setRunpodActiveSshHost("");
           setRunpodActiveSshPort(0);
+          setStoreUptimeSec(null);
+          setStoreCostPerHr(null);
           setPhase("done");
         }
       }
@@ -905,6 +918,9 @@ export default function RunPodLauncher() {
     let inTraceback = false;
     let detected = false;
     let tqdmMaxTotal = 0; // tracks largest tqdm total seen — used to ignore per-epoch bars
+    let pollCount = 0;
+    let everSawOutput = false;
+    let totalLinesSeen = fromLine; // tracks cumulative lines for "log early lines" logic
 
     const triggerCompletion = () => {
       if (detected) return;
@@ -922,10 +938,18 @@ export default function RunPodLauncher() {
         .catch(() => {});
 
       try {
+        pollCount++;
         // Load only new lines since last poll (avoids 50MB+ log reads on long runs)
         const newContent = await sshRunCommand(host, port, keyPath, `awk 'NR>${seenLines}' /workspace/training.log 2>/dev/null`);
         const totalStr = await sshRunCommand(host, port, keyPath, "wc -l < /workspace/training.log 2>/dev/null || echo 0").catch(() => "0");
-        seenLines = parseInt(totalStr.trim(), 10) || seenLines;
+        const newTotal = parseInt(totalStr.trim(), 10) || seenLines;
+        if (newTotal > seenLines) everSawOutput = true;
+        seenLines = newTotal;
+
+        // Warn if training.log is still empty after ~5 minutes (60 polls × 5s)
+        if (!everSawOutput && pollCount === 60) {
+          log(`WARNING: No training output after 5 minutes — the training script may have failed to start. Check that the docker image and base model are correct.`);
+        }
         const newLines = newContent.split("\n");
 
         let lastPodLine = "";
@@ -952,8 +976,10 @@ export default function RunPodLauncher() {
           if (/epoch is incremented/i.test(line)) continue;
 
           const isError = /error|traceback|exception/i.test(line);
-          const isImportant = isError || inTraceback ||
-            /loss[= ]|epoch|saving|saved|step\s+\d|finished|complete|failed|cuda|oom|python:|workspace:|dataset:/i.test(line);
+          // Always log the first 10 lines — they contain launcher info and early errors
+          const isEarlyLine = totalLinesSeen <= 10;
+          const isImportant = isEarlyLine || isError || inTraceback ||
+            /loss[= ]|epoch|saving|saved|step\s+\d|finished|complete|failed|cuda|oom|python:|workspace:|dataset:|loading|building|prepare|launcher:|matched successfully|train images|reg images|bucket \d/i.test(line);
 
           if (isImportant) {
             // Deduplicate consecutive identical pod lines (reconnect double-fire)
@@ -961,9 +987,15 @@ export default function RunPodLauncher() {
             lastPodLine = line;
             log(`[pod] ${line}`);
             if (isError) inTraceback = true;
+            // Update status line during model loading phase (before steps begin)
+            if (/loading.*model|loading.*U-Net|loading.*text encoder|building.*U-Net|prepare/i.test(line))
+              setUploadStatus(`Loading model…`);
+            else if (/loading.*dataset|prepare images|train images/i.test(line))
+              setUploadStatus(`Preparing dataset…`);
           }
         }
 
+        totalLinesSeen = seenLines;
         const newContentStr = newLines.join("\n");
         // Stop polling on completion or fatal halt (check only new lines to avoid re-triggering)
         // Check failure FIRST — the training script always writes "training complete" before
@@ -1011,29 +1043,34 @@ export default function RunPodLauncher() {
         const updated = await getPod(apiKeyRef.current, podId);
         consecutiveErrors = 0;
         setPod(updated);
+        if (updated.costPerHr) setStoreCostPerHr(updated.costPerHr);
         const terminal = updated.status === "EXITED" || updated.status === "TERMINATED" || updated.status === "DEAD";
         if (terminal) {
           stopPolling(`Pod ${updated.status.toLowerCase()} — terminated externally.`);
         } else if (updated.status === "RUNNING") {
-          const uptime = updated.runtime?.uptimeInSeconds ?? 0;
           stopPodTicker();
-          // Only fetch SSH info once (sshHostRef guards against repeated calls)
-          if (!sshHostRef.current) {
-            try {
-              // Try pod runtime ports first (reliable), fall back to runpodctl ssh info
-              const info = await getSshInfo(apiKeyRef.current, updated.id);
-              if (info) {
+          // Fetch SSH info + real uptime from GraphQL on every tick
+          try {
+            const info = await getSshInfo(apiKeyRef.current, updated.id);
+            if (info) {
+              // Sync real uptime from GraphQL
+              if (info.uptimeInSeconds != null && info.uptimeInSeconds > 0) {
+                podUptimeRef.current = info.uptimeInSeconds;
+                setStoreUptimeSec(info.uptimeInSeconds);
+              }
+              // Only set SSH info once (sshHostRef guards against repeated calls)
+              if (!sshHostRef.current) {
                 setSshInfo(info.host, info.port);
                 sshHostRef.current = info.host;
-                const uptimeStr = uptime > 0 ? ` (uptime: ${uptime}s)` : "";
+                const uptimeStr = info.uptimeInSeconds ? ` (uptime: ${info.uptimeInSeconds}s)` : "";
                 log(`Pod running${uptimeStr} — waiting for SSH on ${info.host}:${info.port}…`);
                 startSshWait(info.host, info.port, settings.sshKeyPath, { checkFirst: linkedPodRef.current });
-              } else {
-                log(`SSH info not available yet for pod ${updated.id} — retrying next tick…`);
               }
-            } catch (sshErr) {
-              log(`SSH info fetch failed: ${sshErr} — retrying next tick`);
+            } else if (!sshHostRef.current) {
+              log(`SSH info not available yet for pod ${updated.id} — retrying next tick…`);
             }
+          } catch (sshErr) {
+            if (!sshHostRef.current) log(`SSH info fetch failed: ${sshErr} — retrying next tick`);
           }
         }
       } catch (err) {
@@ -1063,6 +1100,10 @@ export default function RunPodLauncher() {
   const terminateCurrentPod = async () => {
     if (!pod || terminating) return;
     setTerminating(true);
+    // Stop all polling BEFORE terminating — prevents SSH errors from racing the teardown
+    if (_podPollId) { clearInterval(_podPollId); _podPollId = null; }
+    if (_logPollId) { clearInterval(_logPollId); _logPollId = null; }
+    if (_sshWaitId) { clearInterval(_sshWaitId); _sshWaitId = null; }
     try {
       await terminatePod(settings.runpodApiKey, pod.id);
       log(`Pod ${pod.id} terminated.`);
@@ -1070,17 +1111,16 @@ export default function RunPodLauncher() {
       log(`Terminate error: ${err}`);
     } finally {
       setTerminating(false);
-      // Stop all polling and clear persisted pod state
-      if (_podPollId) { clearInterval(_podPollId); _podPollId = null; }
-      if (_logPollId) { clearInterval(_logPollId); _logPollId = null; }
-      if (_sshWaitId) { clearInterval(_sshWaitId); _sshWaitId = null; }
       _connectedPodId = "";
       setPod(null);
+      setActivePods([]);
       setSshInfo("", 0);
       sshHostRef.current = "";
       setRunpodActivePodId("");
       setRunpodActiveSshHost("");
       setRunpodActiveSshPort(0);
+      setStoreUptimeSec(null);
+      setStoreCostPerHr(null);
       setPhase("done");
     }
   };
@@ -1114,7 +1154,9 @@ export default function RunPodLauncher() {
         fetchGpuPrices(settings.runpodApiKey),
       ]);
       if (gpus.status === "fulfilled") {
-        setLiveGpuTypes([...gpus.value].sort((a, b) => b.memoryInGb - a.memoryInGb));
+        const sorted = [...gpus.value].sort((a, b) => b.memoryInGb - a.memoryInGb);
+        setLiveGpuTypes(sorted);
+        liveGpuTypesRef.current = sorted;
       } else {
         log(`GPU list fetch error: ${gpus.reason}`);
       }
@@ -1464,20 +1506,29 @@ export default function RunPodLauncher() {
               </button>
             </div>
             {(() => {
-              const gpuList = liveGpuTypes ?? RECOMMENDED_GPUS.map((g) => ({ id: g.id, displayName: g.label, memoryInGb: g.vram }));
-              // Compute best value: steps/sec per $/hr — only for GPUs in RECOMMENDED_GPUS (have throughput data)
+              if (!liveGpuTypes || liveGpuTypes.length === 0) {
+                return <div style={{ fontFamily: "var(--font-mono)", fontSize: "11px", color: "var(--text-secondary)", padding: "8px 0" }}>
+                  No GPU data — enter your RunPod API key and click Refresh GPUs.
+                </div>;
+              }
+              const gpuList = liveGpuTypes.filter(g => isGpuCompatible(g.displayName, g.memoryInGb));
+              if (gpuList.length === 0) {
+                return <div style={{ fontFamily: "var(--font-mono)", fontSize: "11px", color: "var(--text-secondary)", padding: "8px 0" }}>
+                  No compatible GPUs found — all available GPUs are either pre-Ampere (no bf16) or under 10GB VRAM.
+                </div>;
+              }
+              // Compute best value: steps/sec per $/hr using VRAM-inferred throughput
               let bestValueGpuId: string | null = null;
               if (livePrices) {
                 let bestRatio = 0;
                 for (const gpu of gpuList) {
-                  const rec = RECOMMENDED_GPUS.find(r => r.id === gpu.id || r.label === gpu.displayName);
-                  if (!rec) continue;
+                  const sps = stepsPerSecForVram(gpu.memoryInGb);
                   const price = livePrices.get(gpu.displayName);
                   const pricePerHr = config.cloudType === "SECURE"
                     ? (price?.secure ?? 0)
                     : (price?.community ?? price?.secure ?? 0);
                   if (pricePerHr <= 0) continue;
-                  const ratio = rec.stepsPerSec / pricePerHr;
+                  const ratio = sps / pricePerHr;
                   if (ratio > bestRatio) { bestRatio = ratio; bestValueGpuId = gpu.id; }
                 }
               }
@@ -2028,12 +2079,12 @@ export default function RunPodLauncher() {
                     </span>
                   </div>
                   <div style={{ fontFamily: "var(--font-mono)", fontSize: "10px", color: "var(--text-secondary)" }}>
-                    ${pod.costPerHr?.toFixed(3) ?? "?"}/hr
-                    {podUptimeSec != null && podUptimeSec > 0
-                      ? ` · ${podUptimeSec >= 3600 ? `${Math.floor(podUptimeSec / 3600)}h ${Math.floor((podUptimeSec % 3600) / 60)}m` : `${Math.floor(podUptimeSec / 60)}m ${podUptimeSec % 60}s`}`
+                    ${(pod.costPerHr ?? storeCostPerHr)?.toFixed(3) ?? "?"}/hr
+                    {storeUptimeSec != null && storeUptimeSec > 0
+                      ? ` · ${storeUptimeSec >= 3600 ? `${Math.floor(storeUptimeSec / 3600)}h ${Math.floor((storeUptimeSec % 3600) / 60)}m` : `${Math.floor(storeUptimeSec / 60)}m ${storeUptimeSec % 60}s`}`
                       : ""}
-                    {podUptimeSec != null && podUptimeSec > 0 && pod.costPerHr
-                      ? ` · ~$${(pod.costPerHr * podUptimeSec / 3600).toFixed(3)} spent`
+                    {storeUptimeSec != null && storeUptimeSec > 0 && (pod.costPerHr ?? storeCostPerHr)
+                      ? ` · ~$${((pod.costPerHr ?? storeCostPerHr)! * storeUptimeSec / 3600).toFixed(3)} spent`
                       : ""}
                     {polling ? " · polling every 15s" : ""}
                   </div>
@@ -2158,27 +2209,6 @@ export default function RunPodLauncher() {
                   {line || <br />}
                 </div>
               ))}
-              {pipelineStep === 3 && sshHost && !downloadFailed && !trainingHalted && (
-                <div style={{
-                  display: "flex", alignItems: "center", gap: "10px", marginTop: "8px",
-                  padding: "7px 10px", borderRadius: "5px",
-                  position: "sticky", bottom: 0,
-                  background: "rgba(100,100,100,0.15)", border: "1px solid rgba(150,150,150,0.25)",
-                  backdropFilter: "blur(4px)",
-                }}>
-                  <span style={{ fontFamily: "var(--font-mono)", fontSize: "10px", color: "var(--text-dim)", flex: 1 }}>
-                    Training complete? Force-start download
-                  </span>
-                  <button
-                    className="btn-ghost"
-                    disabled={!!uploadStatus}
-                    style={{ padding: "3px 10px", fontSize: "10px", color: "var(--accent-bright)", borderColor: "var(--accent-dim)" }}
-                    onClick={() => downloadOutputs(sshHost, sshPort, settings.sshKeyPath)}
-                  >
-                    Download LoRA
-                  </button>
-                </div>
-              )}
               {downloadFailed && sshHost && (
                 <div style={{
                   display: "flex", alignItems: "center", gap: "10px", marginTop: "8px",

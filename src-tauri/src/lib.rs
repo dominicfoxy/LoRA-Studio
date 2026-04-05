@@ -7,6 +7,19 @@ use serde::{Deserialize, Serialize};
 use base64::{Engine as _, engine::general_purpose};
 use tauri_plugin_dialog::DialogExt;
 
+/// Expand a leading `~` or `~/` to the user's home directory.
+/// Passes through any other path unchanged.
+fn expand_tilde(raw: &str) -> String {
+    if raw == "~" {
+        return std::env::var("HOME").unwrap_or_else(|_| "~".to_string());
+    }
+    if let Some(rest) = raw.strip_prefix("~/") {
+        let home = std::env::var("HOME").unwrap_or_else(|_| "~".to_string());
+        return format!("{}/{}", home, rest);
+    }
+    raw.to_string()
+}
+
 // ── Forge proxy ───────────────────────────────────────────────────────────────
 // All HTTP to Forge goes through Rust/reqwest — Tauri webview blocks
 // fetch() to localhost in many configurations.
@@ -102,6 +115,8 @@ async fn pick_file(app: tauri::AppHandle, filter_name: String, extensions: Vec<S
 
 #[tauri::command]
 async fn extract_archive(archive_path: String, dest_dir: String) -> Result<(), String> {
+    let archive_path = expand_tilde(&archive_path);
+    let dest_dir = expand_tilde(&dest_dir);
     fs::create_dir_all(&dest_dir).map_err(|e| e.to_string())?;
     let lower = archive_path.to_lowercase();
 
@@ -144,12 +159,14 @@ pub struct ImageEntry {
 
 #[tauri::command]
 async fn save_caption(image_path: String, caption: String) -> Result<(), String> {
+    let image_path = expand_tilde(&image_path);
     let caption_path = Path::new(&image_path).with_extension("txt");
     fs::write(&caption_path, &caption).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 async fn load_caption(image_path: String) -> Result<String, String> {
+    let image_path = expand_tilde(&image_path);
     let caption_path = Path::new(&image_path).with_extension("txt");
     if caption_path.exists() {
         fs::read_to_string(&caption_path).map_err(|e| e.to_string())
@@ -160,6 +177,7 @@ async fn load_caption(image_path: String) -> Result<String, String> {
 
 #[tauri::command]
 async fn read_image_b64(path: String) -> Result<String, String> {
+    let path = expand_tilde(&path);
     let mut file = fs::File::open(&path).map_err(|e| e.to_string())?;
     let mut buf = Vec::new();
     file.read_to_end(&mut buf).map_err(|e| e.to_string())?;
@@ -168,6 +186,7 @@ async fn read_image_b64(path: String) -> Result<String, String> {
 
 #[tauri::command]
 async fn list_images_in_dir(dir: String) -> Result<Vec<String>, String> {
+    let dir = expand_tilde(&dir);
     let path = Path::new(&dir);
     if !path.exists() {
         return Ok(vec![]);
@@ -189,6 +208,7 @@ async fn list_images_in_dir(dir: String) -> Result<Vec<String>, String> {
 
 #[tauri::command]
 async fn save_image_bytes(path: String, data: Vec<u8>) -> Result<(), String> {
+    let path = expand_tilde(&path);
     if let Some(parent) = Path::new(&path).parent() {
         fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
@@ -197,6 +217,7 @@ async fn save_image_bytes(path: String, data: Vec<u8>) -> Result<(), String> {
 
 #[tauri::command]
 async fn delete_image(path: String) -> Result<(), String> {
+    let path = expand_tilde(&path);
     fs::remove_file(&path).map_err(|e| e.to_string())?;
     let caption_path = Path::new(&path).with_extension("txt");
     if caption_path.exists() {
@@ -206,36 +227,61 @@ async fn delete_image(path: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-async fn zip_dataset(dataset_dir: String, output_zip: String) -> Result<String, String> {
+async fn zip_dataset(dataset_dir: String, output_zip: String, include_paths: Option<Vec<String>>) -> Result<String, String> {
+    let dataset_dir = expand_tilde(&dataset_dir);
+    let output_zip = expand_tilde(&output_zip);
+    let include_paths = include_paths.map(|paths| paths.iter().map(|p| expand_tilde(p)).collect::<Vec<_>>());
     let file = fs::File::create(&output_zip).map_err(|e| e.to_string())?;
     let mut zip = zip::ZipWriter::new(file);
     let options = zip::write::FileOptions::default()
         .compression_method(zip::CompressionMethod::Deflated);
 
     let dataset_path = Path::new(&dataset_dir);
-    let output_zip_path = Path::new(&output_zip);
-    for entry in walkdir::WalkDir::new(dataset_path) {
-        let entry = entry.map_err(|e| e.to_string())?;
-        let path = entry.path();
-        if !path.is_file() { continue; }
-        // Only include image and caption sidecar files — skip zip, toml, json, etc.
-        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
-        if !matches!(ext.as_str(), "png" | "jpg" | "jpeg" | "webp" | "txt") { continue; }
-        // Never include the output zip itself (it lives in the same directory)
-        if path == output_zip_path { continue; }
-        let rel = path.strip_prefix(dataset_path).map_err(|e| e.to_string())?;
-        zip.start_file(rel.to_string_lossy(), options).map_err(|e| e.to_string())?;
-        let mut f = fs::File::open(path).map_err(|e| e.to_string())?;
-        let mut buf = Vec::new();
-        f.read_to_end(&mut buf).map_err(|e| e.to_string())?;
-        zip.write_all(&buf).map_err(|e| e.to_string())?;
+
+    // If include_paths is provided, only zip those files (+ their .txt sidecars).
+    // Otherwise fall back to zipping all image/txt files in the directory.
+    if let Some(ref paths) = include_paths {
+        let mut to_zip: Vec<std::path::PathBuf> = Vec::new();
+        for p in paths {
+            let img = Path::new(p);
+            if img.is_file() { to_zip.push(img.to_path_buf()); }
+            // Include the .txt sidecar if it exists
+            let sidecar = img.with_extension("txt");
+            if sidecar.is_file() { to_zip.push(sidecar); }
+        }
+        for path in &to_zip {
+            let rel = path.strip_prefix(dataset_path).map_err(|e| e.to_string())?;
+            zip.start_file(rel.to_string_lossy(), options).map_err(|e| e.to_string())?;
+            let mut f = fs::File::open(path).map_err(|e| e.to_string())?;
+            let mut buf = Vec::new();
+            f.read_to_end(&mut buf).map_err(|e| e.to_string())?;
+            zip.write_all(&buf).map_err(|e| e.to_string())?;
+        }
+    } else {
+        let output_zip_path = Path::new(&output_zip);
+        for entry in walkdir::WalkDir::new(dataset_path) {
+            let entry = entry.map_err(|e| e.to_string())?;
+            let path = entry.path();
+            if !path.is_file() { continue; }
+            let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
+            if !matches!(ext.as_str(), "png" | "jpg" | "jpeg" | "webp" | "txt") { continue; }
+            if path == output_zip_path { continue; }
+            let rel = path.strip_prefix(dataset_path).map_err(|e| e.to_string())?;
+            zip.start_file(rel.to_string_lossy(), options).map_err(|e| e.to_string())?;
+            let mut f = fs::File::open(path).map_err(|e| e.to_string())?;
+            let mut buf = Vec::new();
+            f.read_to_end(&mut buf).map_err(|e| e.to_string())?;
+            zip.write_all(&buf).map_err(|e| e.to_string())?;
+        }
     }
+
     zip.finish().map_err(|e| e.to_string())?;
     Ok(output_zip)
 }
 
 #[tauri::command]
 async fn save_project(path: String, data: String) -> Result<(), String> {
+    let path = expand_tilde(&path);
     if let Some(parent) = Path::new(&path).parent() {
         fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
@@ -244,16 +290,19 @@ async fn save_project(path: String, data: String) -> Result<(), String> {
 
 #[tauri::command]
 async fn load_project(path: String) -> Result<String, String> {
+    let path = expand_tilde(&path);
     fs::read_to_string(&path).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 async fn ensure_dir(path: String) -> Result<(), String> {
+    let path = expand_tilde(&path);
     fs::create_dir_all(&path).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 fn path_exists(path: String) -> bool {
+    let path = expand_tilde(&path);
     std::path::Path::new(&path).exists()
 }
 
@@ -365,6 +414,7 @@ async fn setup_ssh_key(api_key: String) -> Result<String, String> {
 
 #[tauri::command]
 async fn run_ssh_command(host: String, port: u16, key_path: String, command: String) -> Result<String, String> {
+    let key_path = expand_tilde(&key_path);
     let port_str = port.to_string();
     let remote = format!("root@{}", host);
     let output = tokio::task::spawn_blocking(move || {
@@ -393,6 +443,8 @@ async fn run_ssh_command(host: String, port: u16, key_path: String, command: Str
 
 #[tauri::command]
 async fn ssh_upload_file(host: String, port: u16, key_path: String, local_path: String, remote_path: String) -> Result<(), String> {
+    let local_path = expand_tilde(&local_path);
+    let key_path = expand_tilde(&key_path);
     let port_str = port.to_string();
     let dest = format!("root@{}:{}", host, remote_path);
     let output = tokio::task::spawn_blocking(move || {
@@ -415,6 +467,8 @@ async fn ssh_upload_file(host: String, port: u16, key_path: String, local_path: 
 
 #[tauri::command]
 async fn ssh_download_file(host: String, port: u16, key_path: String, remote_path: String, local_path: String) -> Result<(), String> {
+    let local_path = expand_tilde(&local_path);
+    let key_path = expand_tilde(&key_path);
     if let Some(parent) = std::path::Path::new(&local_path).parent() {
         fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
@@ -440,6 +494,7 @@ async fn ssh_download_file(host: String, port: u16, key_path: String, remote_pat
 
 #[tauri::command]
 async fn ssh_is_ready(host: String, port: u16, key_path: String) -> Result<bool, String> {
+    let key_path = expand_tilde(&key_path);
     let port_str = port.to_string();
     let remote = format!("root@{}", host);
     let output = tokio::task::spawn_blocking(move || {
@@ -501,6 +556,7 @@ async fn fetch_pod_ssh(api_key: String, pod_id: String) -> Result<serde_json::Va
 
 #[tauri::command]
 async fn list_lora_files(dir: String) -> Result<Vec<String>, String> {
+    let dir = expand_tilde(&dir);
     let path = Path::new(&dir);
     if !path.exists() { return Ok(vec![]); }
     let mut files = vec![];

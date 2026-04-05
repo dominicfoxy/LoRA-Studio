@@ -470,6 +470,18 @@ export default function BatchGenerator() {
     if (failures > 0) setPurgeFailCount(failures);
   };
 
+  const purgeUnapproved = async () => {
+    let failures = 0;
+    const unapproved = images.filter(img => img.approved !== true);
+    for (const img of unapproved) {
+      try { await invoke("delete_image", { path: img.path }); } catch { failures++; }
+    }
+    // Remove unapproved from store, keep approved
+    for (const img of unapproved) removeImage(img.id);
+    setConfirmPurge(false);
+    if (failures > 0) setPurgeFailCount(failures);
+  };
+
   const handleGenerateClick = () => {
     if (images.length > 0) {
       setConfirmGenerate(true);
@@ -703,18 +715,28 @@ export default function BatchGenerator() {
       {confirmPurge && (
         <div style={{ padding: "10px 28px", background: "rgba(154,74,74,0.12)", borderBottom: "1px solid var(--red)", flexShrink: 0, display: "flex", alignItems: "center", gap: "16px" }}>
           <span style={{ fontFamily: "var(--font-mono)", fontSize: "11px", color: "var(--red-bright)", flex: 1 }}>
-            This will permanently delete all images and caption files from the output directory — including any not tracked in this session. This cannot be undone.
+            {approved.length > 0
+              ? `${approved.length} approved, ${pending.length + rejected.length} unapproved. Delete unapproved only, or nuke everything?`
+              : "This will permanently delete all images and caption files. This cannot be undone."}
           </span>
+          {approved.length > 0 && (pending.length + rejected.length) > 0 && (
+            <button onClick={purgeUnapproved} style={{
+              padding: "5px 14px", fontSize: "11px", cursor: "pointer",
+              background: "var(--accent-glow)", border: "1px solid var(--accent-dim)", color: "var(--accent-bright)",
+              borderRadius: "4px", fontFamily: "var(--font-display)", fontWeight: 700,
+              letterSpacing: "0.05em", textTransform: "uppercase",
+            }}>Unapproved only ({pending.length + rejected.length})</button>
+          )}
           <button onClick={purgeAll} style={{
             padding: "5px 14px", fontSize: "11px", cursor: "pointer",
             background: "var(--red)", border: "none", color: "white",
             borderRadius: "4px", fontFamily: "var(--font-display)", fontWeight: 700,
             letterSpacing: "0.05em", textTransform: "uppercase",
-          }}>Delete all</button>
+          }}>Delete all ({images.length})</button>
           <button onClick={() => setConfirmPurge(false)} style={{
             padding: "5px 14px", fontSize: "11px", cursor: "pointer",
             background: "transparent", border: "1px solid var(--border)",
-            color: "var(--text-muted)", borderRadius: "4px",
+            color: "var(--text-secondary)", borderRadius: "4px",
             fontFamily: "var(--font-display)", fontWeight: 600, letterSpacing: "0.05em",
           }}>Cancel</button>
         </div>

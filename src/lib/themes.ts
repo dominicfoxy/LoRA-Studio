@@ -15,7 +15,7 @@ export const DEFAULT_VARS: ThemeVars = {
   "--bg-2": "#1c1c1f",
   "--bg-3": "#242428",
   "--bg-4": "#2e2e33",
-  "--border": "#2e2e33",
+  "--border": "#35353b",
   "--border-light": "#3a3a40",
   "--text-primary": "#e8e6e1",
   "--text-secondary": "#9e9c97",

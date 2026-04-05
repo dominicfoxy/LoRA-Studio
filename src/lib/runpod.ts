@@ -37,6 +37,7 @@ export interface Pod {
 export interface SshInfo {
   host: string;
   port: number;
+  uptimeInSeconds?: number;
 }
 
 // ── GraphQL pricing (fetch() is fine — external URL) ──────────────────────────
@@ -103,8 +104,7 @@ export async function listNetworkVolumes(apiKey: string): Promise<NetworkVolume[
 }
 
 export async function listGpuTypes(apiKey: string): Promise<Array<{ id: string; displayName: string; memoryInGb: number }>> {
-  // Note: runpodctl gpu list does not return pricing data.
-  // GPU IDs from this list may differ in format from RECOMMENDED_GPUS — verify with `runpodctl gpu list`.
+  // Note: runpodctl gpu list does not return pricing data — use fetchGpuPrices() for that.
   const out = await runpodctl(["gpu", "list"], apiKey);
   const parsed = tryParseJson(out.trim());
   if (!parsed || !Array.isArray(parsed)) return [];
@@ -176,11 +176,12 @@ export async function listPods(apiKey: string): Promise<Pod[]> {
 // Returns null if runtime ports aren't available yet.
 export async function getSshInfo(apiKey: string, podId: string): Promise<SshInfo | null> {
   const res = await invoke<any>("fetch_pod_ssh", { apiKey, podId });
-  const ports = res?.data?.pod?.runtime?.ports as Array<{ ip: string; privatePort: number; publicPort: number }> | undefined;
+  const runtime = res?.data?.pod?.runtime;
+  const ports = runtime?.ports as Array<{ ip: string; privatePort: number; publicPort: number }> | undefined;
   if (!ports || ports.length === 0) return null;
   const sshPort = ports.find(p => p.privatePort === 22);
   if (!sshPort || !sshPort.ip || !sshPort.publicPort) return null;
-  return { host: sshPort.ip, port: sshPort.publicPort };
+  return { host: sshPort.ip, port: sshPort.publicPort, uptimeInSeconds: runtime?.uptimeInSeconds };
 }
 
 // ── SSH invoke wrappers ────────────────────────────────────────────────────────
@@ -201,17 +202,29 @@ export function sshDownloadFile(host: string, port: number, keyPath: string, rem
   return invoke("ssh_download_file", { host, port, keyPath, remotePath, localPath });
 }
 
-// ── GPU recommendations ────────────────────────────────────────────────────────
+// ── GPU throughput estimates ───────────────────────────────────────────────────
 
-// stepsPerSec: real-world throughput at 1024px SDXL (L40S confirmed at 0.4; others scaled proportionally)
-// Note: GPU IDs must match exactly what `runpodctl gpu list` returns — verify after install.
-export const RECOMMENDED_GPUS = [
-  { id: "NVIDIA A100 80GB PCIe",    label: "A100 80GB",      vram: 80, stepsPerSec: 0.70 },
-  { id: "NVIDIA A100-SXM4-40GB",   label: "A100 40GB",      vram: 40, stepsPerSec: 0.55 },
-  { id: "NVIDIA RTX A6000",         label: "RTX A6000 48GB", vram: 48, stepsPerSec: 0.40 },
-  { id: "NVIDIA L40S",              label: "L40S 48GB",       vram: 48, stepsPerSec: 0.40 },
-  { id: "NVIDIA GeForce RTX 3090",  label: "RTX 3090 24GB",  vram: 24, stepsPerSec: 0.20 },
-];
+// Pre-Ampere GPUs that lack native bf16 — training uses --mixed_precision bf16.
+// Matched case-insensitively against GPU displayName.
+const PRE_AMPERE_PATTERNS = [/\bV100\b/i, /\bT4\b/i, /\bRTX\s*20/i, /\bP100\b/i, /\bP40\b/i, /\bK80\b/i];
+
+// Returns true if the GPU is suitable for Kohya LoRA training:
+// - Ampere+ architecture (bf16 support)
+// - At least 10GB VRAM (below that, better to train locally)
+export function isGpuCompatible(displayName: string, vramGb: number): boolean {
+  if (vramGb < 10) return false;
+  return !PRE_AMPERE_PATTERNS.some(p => p.test(displayName));
+}
+
+// Infer approximate steps/sec at 1024px SDXL from VRAM tier.
+// L40S (48GB) confirmed at ~0.4 steps/sec; others scaled proportionally.
+export function stepsPerSecForVram(vramGb: number): number {
+  if (vramGb >= 80) return 0.70;
+  if (vramGb >= 48) return 0.40;
+  if (vramGb >= 40) return 0.45;
+  if (vramGb >= 24) return 0.25;
+  return 0.15;
+}
 
 export interface GpuTrainingFlags {
   batchSize: number;

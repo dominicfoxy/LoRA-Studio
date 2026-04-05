@@ -135,9 +135,13 @@ export interface ProjectState {
   runpodActivePodId: string;
   runpodActiveSshHost: string;
   runpodActiveSshPort: number;
+  runpodUptimeSec: number | null;
+  runpodCostPerHr: number | null;
   setRunpodActivePodId: (id: string) => void;
   setRunpodActiveSshHost: (host: string) => void;
   setRunpodActiveSshPort: (port: number) => void;
+  setRunpodUptimeSec: (sec: number | null) => void;
+  setRunpodCostPerHr: (cost: number | null) => void;
 }
 
 const defaultCharacter: CharacterConfig = {
@@ -236,9 +240,13 @@ export const useStore = create<ProjectState>()(
       runpodActivePodId: "",
       runpodActiveSshHost: "",
       runpodActiveSshPort: 0,
+      runpodUptimeSec: null,
+      runpodCostPerHr: null,
       setRunpodActivePodId: (id) => set({ runpodActivePodId: id }),
       setRunpodActiveSshHost: (host) => set({ runpodActiveSshHost: host }),
       setRunpodActiveSshPort: (port) => set({ runpodActiveSshPort: port }),
+      setRunpodUptimeSec: (sec) => set({ runpodUptimeSec: sec }),
+      setRunpodCostPerHr: (cost) => set({ runpodCostPerHr: cost }),
 
       addImage: (img) => set((s) => ({ images: [...s.images, img] })),
       updateImage: (id, patch) =>
