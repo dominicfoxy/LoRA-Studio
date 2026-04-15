@@ -25,3 +25,9 @@ Thumbs.db
 # Logs
 *.log
 npm-debug.log*
+
+# Local tooling / agent config
+.omc/
+opencode.json
+opencode.json.*
+tui.json
