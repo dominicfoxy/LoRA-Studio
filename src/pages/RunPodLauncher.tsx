@@ -9,15 +9,8 @@ import {
   listNetworkVolumes, checkRunpodctl, installRunpodctl, setupSshKey,
   sshIsReady, sshRunCommand, sshUploadFile, sshDownloadFile,
   KOHYA_POD_TEMPLATE, generateKohyaConfig, gpuTrainingFlags, stepsPerSecForVram, isGpuCompatible,
-  Pod, NetworkVolume, GpuPrice,
 } from "../lib/runpod";
-
-interface SearchResult {
-  source: "civitai" | "huggingface";
-  label: string;
-  sublabel: string;
-  downloadUrl: string;
-}
+import type { Pod, NetworkVolume, GpuPrice, SearchResult } from "../lib/runpod";
 
 
 type Phase = "config" | "packaging" | "uploading" | "training" | "done";
@@ -35,14 +28,6 @@ function logColor(line: string): string {
 function sanitizeShellArg(s: string): string {
   return s.replace(/["$`\\]/g, "");
 }
-
-// Module-level state — survives HMR remounts (React Fast Refresh doesn't re-run module scope)
-let _podPollId: ReturnType<typeof setInterval> | null = null;
-let _logPollId: ReturnType<typeof setInterval> | null = null;
-let _sshWaitId: ReturnType<typeof setInterval> | null = null;
-let _uploadInProgress = false;
-// Track which pod we've already reconnected to — prevents re-running reconnect on tab switches
-let _connectedPodId = "";
 
 export default function RunPodLauncher() {
   const { character, images, settings, setSettings, training: config, updateTraining: setConfig, runpodLogs: logs, addRunpodLog, clearRunpodLogs, runpodActivePodId, runpodActiveSshHost, runpodActiveSshPort, setRunpodActivePodId, setRunpodActiveSshHost, setRunpodActiveSshPort, runpodUptimeSec: storeUptimeSec, runpodCostPerHr: storeCostPerHr, setRunpodUptimeSec: setStoreUptimeSec, setRunpodCostPerHr: setStoreCostPerHr } = useStore();
@@ -91,6 +76,13 @@ export default function RunPodLauncher() {
   const [modelLoading, setModelLoading] = useState(false);
   const [modelOpen, setModelOpen] = useState(false);
   const [modelSelected, setModelSelected] = useState("");
+  // Timer IDs and guards — managed by React lifecycle, cleaned up on unmount
+  const podPollIdRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const logPollIdRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const sshWaitIdRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const uploadInProgressRef = useRef(false);
+  const connectedPodIdRef = useRef("");
+
   const podUptimeRef = useRef<number | null>(storeUptimeSec);
   const uptimeIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const [logCopied, setLogCopied] = useState(false);
@@ -146,11 +138,11 @@ export default function RunPodLauncher() {
   // Clear all intervals on unmount to prevent accumulation across navigations
   useEffect(() => {
     return () => {
-      if (_podPollId) { clearInterval(_podPollId); _podPollId = null; }
-      if (_logPollId) { clearInterval(_logPollId); _logPollId = null; }
-      if (_sshWaitId) { clearInterval(_sshWaitId); _sshWaitId = null; }
-      _uploadInProgress = false;
-      _connectedPodId = ""; // allow reconnect to re-fire on remount
+      if (podPollIdRef.current) { clearInterval(podPollIdRef.current); podPollIdRef.current = null; }
+      if (logPollIdRef.current) { clearInterval(logPollIdRef.current); logPollIdRef.current = null; }
+      if (sshWaitIdRef.current) { clearInterval(sshWaitIdRef.current); sshWaitIdRef.current = null; }
+      uploadInProgressRef.current = false;
+      connectedPodIdRef.current = ""; // allow reconnect to re-fire on remount
     };
   }, []);
 
@@ -272,8 +264,8 @@ export default function RunPodLauncher() {
   // Reconnect to an active pod if we navigated away and came back
   useEffect(() => {
     if (!runpodActivePodId || !hasApiKey) return;
-    if (_connectedPodId === runpodActivePodId) return;
-    _connectedPodId = runpodActivePodId;
+    if (connectedPodIdRef.current === runpodActivePodId) return;
+    connectedPodIdRef.current = runpodActivePodId;
     getPod(apiKeyRef.current, runpodActivePodId).then((p) => {
       setPodLocal(p);
       setPhase("training");
@@ -318,7 +310,7 @@ export default function RunPodLauncher() {
           .catch(() => checkAndResume(host, port, keyPath));
       }
     }).catch(() => {
-      _connectedPodId = "";
+      connectedPodIdRef.current = "";
       setRunpodActivePodId("");
       setRunpodActiveSshHost("");
       setRunpodActiveSshPort(0);
@@ -416,7 +408,7 @@ export default function RunPodLauncher() {
     if (!settings.sshKeyPath) { log("Error: SSH key not configured — click Setup above first."); return; }
     linkedPodRef.current = false;
 
-    _connectedPodId = "";
+    connectedPodIdRef.current = "";
     setPhase("training");
     log("Launching RunPod pod...");
 
@@ -494,7 +486,7 @@ export default function RunPodLauncher() {
 
   // Start polling SSH readiness — clears any existing wait first (prevents duplicates across remounts)
   const startSshWait = (host: string, port: number, keyPath: string, opts: { checkFirst?: boolean } = {}) => {
-    if (_sshWaitId) { clearInterval(_sshWaitId); _sshWaitId = null; }
+    if (sshWaitIdRef.current) { clearInterval(sshWaitIdRef.current); sshWaitIdRef.current = null; }
     // Set the ref immediately so the pod poll tick's !sshHostRef.current guard
     // prevents a duplicate call before the first ssh_is_ready check fires
     sshHostRef.current = host;
@@ -511,7 +503,7 @@ export default function RunPodLauncher() {
         const ready = await sshIsReady(host, port, keyPath);
         if (attempts <= 3 || attempts % 10 === 0) log(`SSH probe #${attempts} → ${ready ? "ready" : "not ready yet"} (${host}:${port})`);
         if (ready) {
-          if (_sshWaitId) { clearInterval(_sshWaitId); _sshWaitId = null; }
+          if (sshWaitIdRef.current) { clearInterval(sshWaitIdRef.current); sshWaitIdRef.current = null; }
           stopSshTicker();
           if (opts.checkFirst) {
             log(`SSH ready — checking pod state…`);
@@ -521,7 +513,7 @@ export default function RunPodLauncher() {
             uploadToVolume(host, port, keyPath);
           }
         } else if (attempts >= 120) {
-          if (_sshWaitId) { clearInterval(_sshWaitId); _sshWaitId = null; }
+          if (sshWaitIdRef.current) { clearInterval(sshWaitIdRef.current); sshWaitIdRef.current = null; }
           stopSshTicker();
           log(`SSH unreachable after 10 min — pod may still be starting. Try: ssh -p ${port} root@${host}`);
         }
@@ -531,7 +523,7 @@ export default function RunPodLauncher() {
     };
 
     check();
-    _sshWaitId = setInterval(check, 5000);
+    sshWaitIdRef.current = setInterval(check, 5000);
   };
 
   const applySensibleDefaults = () => {
@@ -696,10 +688,10 @@ export default function RunPodLauncher() {
   };
 
   const uploadToVolume = async (host: string, port: number, keyPath: string, opts: { skipZipUpload?: boolean } = {}) => {
-    if (_uploadInProgress) { log("Upload already in progress — ignoring duplicate request."); return; }
-    _uploadInProgress = true;
+    if (uploadInProgressRef.current) { log("Upload already in progress — ignoring duplicate request."); return; }
+    uploadInProgressRef.current = true;
     const actualZipPath = zipPath || expectedZipPath;
-    if (!actualZipPath && !opts.skipZipUpload) { _uploadInProgress = false; return; }
+    if (!actualZipPath && !opts.skipZipUpload) { uploadInProgressRef.current = false; return; }
     const volumeId = effectiveVolumeIdRef.current;
     const datasetKey = `${character.triggerWord}_${Date.now()}`;
     const existing = volumeId ? settings.volumeContents?.[volumeId] : null;
@@ -830,9 +822,9 @@ export default function RunPodLauncher() {
       }
 
       await launchTraining(host, port, keyPath, modelBaseName, gpuFlags);
-      _uploadInProgress = false;
+      uploadInProgressRef.current = false;
     } catch (err) {
-      _uploadInProgress = false;
+      uploadInProgressRef.current = false;
       setUploadStatus(null);
       log(`Upload error: ${err}`);
     }
@@ -883,16 +875,16 @@ export default function RunPodLauncher() {
       const apiKey = apiKeyRef.current;
       if (autoTerminateRef.current && podId && apiKey) {
         // Stop all polling BEFORE terminating — prevents SSH errors from racing the teardown
-        if (_podPollId) { clearInterval(_podPollId); _podPollId = null; }
-        if (_logPollId) { clearInterval(_logPollId); _logPollId = null; }
-        if (_sshWaitId) { clearInterval(_sshWaitId); _sshWaitId = null; }
+        if (podPollIdRef.current) { clearInterval(podPollIdRef.current); podPollIdRef.current = null; }
+        if (logPollIdRef.current) { clearInterval(logPollIdRef.current); logPollIdRef.current = null; }
+        if (sshWaitIdRef.current) { clearInterval(sshWaitIdRef.current); sshWaitIdRef.current = null; }
         try {
           await terminatePod(apiKey, podId);
           log(`Pod terminated — billing stopped.`);
         } catch (err) {
           log(`Auto-terminate failed: ${err} — use the Terminate button to stop billing.`);
         } finally {
-          _connectedPodId = "";
+          connectedPodIdRef.current = "";
           setPod(null);
           setActivePods([]);
           setSshInfo("", 0);
@@ -925,13 +917,13 @@ export default function RunPodLauncher() {
     const triggerCompletion = () => {
       if (detected) return;
       detected = true;
-      if (_logPollId) { clearInterval(_logPollId); _logPollId = null; }
+      if (logPollIdRef.current) { clearInterval(logPollIdRef.current); logPollIdRef.current = null; }
       setUploadStatus(null);
       downloadOutputs(host, port, keyPath);
     };
 
-    if (_logPollId) clearInterval(_logPollId);
-    _logPollId = setInterval(async () => {
+    if (logPollIdRef.current) clearInterval(logPollIdRef.current);
+    logPollIdRef.current = setInterval(async () => {
       // Sentinel file check — training script writes .training_done on success
       sshRunCommand(host, port, keyPath, "test -f /workspace/.training_done && echo yes || echo no")
         .then((r) => { if (r.trim() === "yes") triggerCompletion(); })
@@ -1001,8 +993,8 @@ export default function RunPodLauncher() {
         // Check failure FIRST — the training script always writes "training complete" before
         // "training failed (exit N)", so if both appear we must not treat it as success.
         if (/training failed \(exit|ModuleNotFoundError|No module named|command not found/i.test(newContentStr)) {
-          if (_logPollId) { clearInterval(_logPollId); _logPollId = null; }
-          if (_podPollId) { clearInterval(_podPollId); _podPollId = null; setPolling(false); }
+          if (logPollIdRef.current) { clearInterval(logPollIdRef.current); logPollIdRef.current = null; }
+          if (podPollIdRef.current) { clearInterval(podPollIdRef.current); podPollIdRef.current = null; setPolling(false); }
           log(`Training halted — see errors above.`);
           log(`Pod is still running — use Retry to relaunch, or Terminate to stop billing.`);
           setTrainingHalted(true);
@@ -1015,7 +1007,7 @@ export default function RunPodLauncher() {
 
   const startPolling = (podId: string) => {
     if (!podId) return;
-    if (_podPollId) { clearInterval(_podPollId); _podPollId = null; }
+    if (podPollIdRef.current) { clearInterval(podPollIdRef.current); podPollIdRef.current = null; }
     setPolling(true);
     let consecutiveErrors = 0;
     let cancelled = false;
@@ -1024,13 +1016,13 @@ export default function RunPodLauncher() {
       cancelled = true;
       stopPodTicker();
       log(reason);
-      if (_podPollId) { clearInterval(_podPollId); _podPollId = null; }
+      if (podPollIdRef.current) { clearInterval(podPollIdRef.current); podPollIdRef.current = null; }
       setPolling(false);
       setPod(null);
       sshHostRef.current = "";
       setSshInfo("", 0);
-      if (_logPollId) { clearInterval(_logPollId); _logPollId = null; }
-      if (_sshWaitId) { clearInterval(_sshWaitId); _sshWaitId = null; }
+      if (logPollIdRef.current) { clearInterval(logPollIdRef.current); logPollIdRef.current = null; }
+      if (sshWaitIdRef.current) { clearInterval(sshWaitIdRef.current); sshWaitIdRef.current = null; }
       setUploadStatus(null);
       setPhase("done");
       setRunpodActivePodId("");
@@ -1083,8 +1075,8 @@ export default function RunPodLauncher() {
             if (sshHostRef.current) {
               log(`RunPod API unreachable — pod likely still running. Slowing status checks to 1/min.`);
               consecutiveErrors = 0;
-              if (_podPollId) { clearInterval(_podPollId); }
-              _podPollId = setInterval(tick, 60000);
+              if (podPollIdRef.current) { clearInterval(podPollIdRef.current); }
+              podPollIdRef.current = setInterval(tick, 60000);
             } else {
               stopPolling(`Pod unreachable after ${consecutiveErrors} attempts (~5 min) — assuming terminated.`);
             }
@@ -1093,17 +1085,17 @@ export default function RunPodLauncher() {
       }
     };
     tick();
-    _podPollId = setInterval(tick, 15000);
-    setTimeout(() => { if (_podPollId) { clearInterval(_podPollId); _podPollId = null; } setPolling(false); }, 1800000); // 30min max
+    podPollIdRef.current = setInterval(tick, 15000);
+    setTimeout(() => { if (podPollIdRef.current) { clearInterval(podPollIdRef.current); podPollIdRef.current = null; } setPolling(false); }, 1800000); // 30min max
   };
 
   const terminateCurrentPod = async () => {
     if (!pod || terminating) return;
     setTerminating(true);
     // Stop all polling BEFORE terminating — prevents SSH errors from racing the teardown
-    if (_podPollId) { clearInterval(_podPollId); _podPollId = null; }
-    if (_logPollId) { clearInterval(_logPollId); _logPollId = null; }
-    if (_sshWaitId) { clearInterval(_sshWaitId); _sshWaitId = null; }
+    if (podPollIdRef.current) { clearInterval(podPollIdRef.current); podPollIdRef.current = null; }
+    if (logPollIdRef.current) { clearInterval(logPollIdRef.current); logPollIdRef.current = null; }
+    if (sshWaitIdRef.current) { clearInterval(sshWaitIdRef.current); sshWaitIdRef.current = null; }
     try {
       await terminatePod(settings.runpodApiKey, pod.id);
       log(`Pod ${pod.id} terminated.`);
@@ -1111,7 +1103,7 @@ export default function RunPodLauncher() {
       log(`Terminate error: ${err}`);
     } finally {
       setTerminating(false);
-      _connectedPodId = "";
+      connectedPodIdRef.current = "";
       setPod(null);
       setActivePods([]);
       setSshInfo("", 0);

@@ -101,6 +101,12 @@ export interface AppSettings {
   themeFile: string;     // absolute path to a custom theme JSON (empty = none)
   ezMode: boolean;       // guided/beginner mode — locks technical fields, auto-applies sensible defaults
   sshKeyPath: string;    // path to ed25519 private key registered with RunPod (~/.config/lora-studio/runpod_id_ed25519)
+  favourites: {
+    poses: string[];
+    outfits: string[];
+    expressions: string[];
+    backgrounds: string[];
+  };
 }
 
 export interface ProjectState {
@@ -116,6 +122,7 @@ export interface ProjectState {
 
   setCharacter: (c: Partial<CharacterConfig>) => void;
   setSettings: (s: Partial<AppSettings>) => void;
+  updateFavourites: (category: keyof AppSettings["favourites"], updater: (prev: string[]) => string[]) => void;
   updateGeneration: (patch: Partial<GenerationConfig>) => void;
   updateTraining: (patch: Partial<TrainingConfig>) => void;
   addImage: (img: GeneratedImage) => void;
@@ -177,7 +184,7 @@ const defaultTraining: TrainingConfig = {
   weightDecay: 0.01,
 };
 
-const defaultSettings: AppSettings = {
+export const defaultSettings: AppSettings = {
   forgeUrl: "http://localhost:7860",
   comfyUrl: "http://localhost:8188",
   runpodApiKey: "",
@@ -190,6 +197,52 @@ const defaultSettings: AppSettings = {
   themeFile: "",
   ezMode: false,
   sshKeyPath: "",
+  favourites: {
+    poses: [
+      "portrait, close-up, looking at viewer, head and shoulders",
+      "upper body, looking at viewer, hands visible",
+      "cowboy shot, casual stance, looking at viewer",
+      "standing, full body, arms at sides, looking at viewer",
+      "sitting, relaxed pose, looking at viewer",
+      "from behind, looking over shoulder, upper body",
+      "from above, looking up at viewer, foreshortening",
+      "walking, mid-stride, natural movement, full body",
+      "leaning against wall, arms crossed, three-quarter view",
+      "kneeling, hands on knees, low angle",
+    ],
+    outfits: [
+      "casual outfit, jeans, plain t-shirt, sneakers",
+      "formal suit, dress shirt, tie, polished shoes",
+      "sundress, light fabric, bare shoulders",
+      "hoodie, sweatpants, relaxed fit",
+      "sportswear, athletic tank top, running shorts",
+      "business casual, button-up shirt, chinos",
+      "leather jacket, dark jeans, boots",
+      "swimsuit, barefoot",
+      "school uniform, blazer, pleated skirt",
+      "nude",
+    ],
+    expressions: [
+      "neutral expression, relaxed face",
+      "smiling, warm expression, looking at viewer",
+      "serious expression, composed, direct gaze",
+      "laughing, open mouth, genuine joy",
+      "looking away, thoughtful expression, profile",
+      "confident smirk, slight smile, raised eyebrow",
+      "surprised expression, wide eyes, open mouth",
+      "sad expression, downcast eyes, soft frown",
+    ],
+    backgrounds: [
+      "simple background, solid white background, studio lighting",
+      "simple background, solid grey background, soft lighting",
+      "outdoors, forest clearing, dappled sunlight, trees",
+      "outdoors, city street, urban, golden hour lighting",
+      "indoors, cozy bedroom, natural window light",
+      "indoors, modern office, clean, fluorescent lighting",
+      "outdoors, beach, ocean waves, bright sunny day",
+      "studio background, dramatic rim lighting, dark backdrop",
+    ],
+  },
 };
 
 const defaultGeneration: GenerationConfig = {
@@ -229,6 +282,10 @@ export const useStore = create<ProjectState>()(
 
       setCharacter: (c) => set((s) => ({ character: { ...s.character, ...c }, isDirty: true })),
       setSettings: (s) => set((st) => ({ settings: { ...st.settings, ...s } })),
+      updateFavourites: (category, updater) => set((st) => {
+        const favs = st.settings.favourites ?? defaultSettings.favourites;
+        return { settings: { ...st.settings, favourites: { ...favs, [category]: updater(favs[category]) } } };
+      }),
       updateGeneration: (patch) => set((s) => ({ generation: { ...s.generation, ...patch }, isDirty: true })),
       updateTraining: (patch) => set((s) => ({ training: { ...s.training, ...patch } })),
       setGenerationRunning: (running) => set({ generationRunning: running }),
@@ -266,214 +323,84 @@ export const useStore = create<ProjectState>()(
     }),
     {
       name: "lora-studio-state",
-      version: 22,
+      version: 23,
       migrate: (persistedState: unknown, version: number) => {
         const state = persistedState as any;
-        // v0: flat string fields on shot items
-        if (version === 0) {
+
+        // ── Legacy structural transforms (v0–v16) ──────────────────────
+        // These change data shape/types and must run for users upgrading
+        // from very old versions. After v16 every migration was just
+        // "add field with default", which the deep-merge below handles.
+
+        if (version <= 1) {
+          // v0-v1: shots array → generation object
           const sh = state.shots?.[0];
           state.generation = {
-            poses: sh?.pose ? [sh.pose] : [],
-            outfits: sh?.outfit ? [sh.outfit] : [],
-            expressions: sh?.expression ? [sh.expression] : [],
-            backgrounds: sh?.background ? [sh.background] : [],
-            extras: sh?.extras ?? "",
-            loras: [],
-            count: sh?.count ?? 1,
-            width: sh?.width ?? 1024,
-            height: sh?.height ?? 1024,
-          };
-          delete state.shots;
-        }
-        // v1: shots was ShotItem[] with array fields — promote first shot
-        if (version === 1) {
-          const sh = state.shots?.[0];
-          state.generation = {
-            poses: sh?.poses ?? [],
-            outfits: sh?.outfits ?? [],
-            expressions: sh?.expressions ?? [],
-            backgrounds: sh?.backgrounds ?? [],
+            poses: (sh?.poses ?? (sh?.pose ? [sh.pose] : [])).map(
+              (p: unknown) => (typeof p === "string" ? { prompt: p } : p)
+            ),
+            outfits: (sh?.outfits ?? (sh?.outfit ? [sh.outfit] : [])).map(
+              (o: unknown) => (typeof o === "string" ? { prompt: o } : o)
+            ),
+            expressions: sh?.expressions ?? (sh?.expression ? [sh.expression] : []),
+            backgrounds: sh?.backgrounds ?? (sh?.background ? [sh.background] : []),
             extras: sh?.extras ?? "",
             loras: sh?.loras ?? [],
-            positiveEmbeddings: [],
-            negativeEmbeddings: [],
             count: sh?.count ?? 1,
             width: sh?.width ?? 1024,
             height: sh?.height ?? 1024,
           };
           delete state.shots;
         }
-        // v2: generation exists but is missing embedding fields
-        if (version === 2) {
-          state.generation = {
-            ...defaultGeneration,
-            ...state.generation,
-            positiveEmbeddings: state.generation?.positiveEmbeddings ?? [],
-            negativeEmbeddings: state.generation?.negativeEmbeddings ?? [],
-          };
-        }
-        // v3: missing sampler/scheduler/steps/cfg fields
-        if (version === 3) {
-          state.generation = {
-            ...defaultGeneration,
-            ...state.generation,
-            steps: state.generation?.steps ?? 28,
-            cfgScale: state.generation?.cfgScale ?? 7,
-            samplerName: state.generation?.samplerName ?? "DPM++ 2M",
-            scheduler: state.generation?.scheduler ?? "Karras",
-          };
-        }
-        // v4: outfits was string[] — promote to OutfitEntry[]
-        if (version === 4) {
-          state.generation = {
-            ...defaultGeneration,
-            ...state.generation,
-            outfits: (state.generation?.outfits ?? []).map((o: unknown) =>
-              typeof o === "string" ? { prompt: o } : o
-            ),
-          };
-        }
-        // v5: poses was string[] — promote to PoseEntry[]
-        if (version === 5) {
-          state.generation = {
-            ...defaultGeneration,
-            ...state.generation,
-            poses: (state.generation?.poses ?? []).map((p: unknown) =>
-              typeof p === "string" ? { prompt: p } : p
-            ),
-          };
-        }
-        if (version === 6) {
-          state.training = defaultTraining;
-        }
-        // v7→8: add networkVolumeId to training, volumeContents to settings
-        if (version === 7) {
-          state.training = { ...defaultTraining, ...state.training, networkVolumeId: "", baseModelLocalPath: "", baseModelDownloadUrl: "" };
-          state.settings = { ...defaultSettings, ...state.settings, volumeContents: {} };
-        }
-        // v8→9: move dockerImage from training to settings
-        if (version === 8) {
-          const inheritedImage = (state.training as any)?.dockerImage;
-          state.settings = { ...defaultSettings, ...state.settings, dockerImage: inheritedImage || defaultSettings.dockerImage };
-          const training = { ...(state.training ?? {}) } as any;
-          delete training.dockerImage;
-          state.training = { ...defaultTraining, ...training };
-        }
-        // v9→10: add containerDiskInGb to training
-        if (version === 9) {
-          state.training = { ...defaultTraining, ...state.training, containerDiskInGb: defaultTraining.containerDiskInGb };
-        }
-        // ensure dockerImage always present regardless of migration path
-        if (!state.settings?.dockerImage) {
-          state.settings = { ...defaultSettings, ...state.settings, dockerImage: defaultSettings.dockerImage };
-        }
-        // v10→11: add genMode/randomCount to generation
-        if (version === 10) {
-          state.generation = { ...defaultGeneration, ...state.generation, genMode: "all", randomCount: 10 };
-        }
-        // v11→12: add sdxl flag to training
-        if (version === 11) {
-          state.training = { ...defaultTraining, ...state.training, sdxl: true };
-        }
-        // v12→13: bump default steps 2000→1500, networkDim 32→64, drop xformers (handled in training command)
-        if (version === 12) {
-          state.training = { ...defaultTraining, ...state.training, steps: 1500, networkDim: 64 };
-        }
-        // v13→14: add optimizer field
-        if (version === 13) {
-          state.training = { ...state.training, optimizer: "AdamW8bit" };
-        }
-        // v14→15: add theme fields to settings
-        if (version === 14) {
-          state.settings = { ...defaultSettings, ...state.settings, activeTheme: "default", themeFile: "" };
-        }
-        // v15→16: reduce default SDXL networkDim 64→32 (higher rank absorbs style/color from training data)
-        if (version === 15) {
-          if (state.training?.networkDim === 64) state.training = { ...state.training, networkDim: 32 };
-        }
-        // v19→20: add ezMode
-        if (version === 19) {
-          state.settings = { ...defaultSettings, ...state.settings, ezMode: false };
-        }
-        // v21→22: runpodctl + SSH migration — add sshKeyPath to settings
-        if (version === 21) {
-          state.settings = { ...defaultSettings, ...state.settings, sshKeyPath: "" };
-        }
-        // v20→21: pin docker image — replace any kohya :latest variant with 25.2.1
-        if (version === 20) {
-          const img = state.settings?.dockerImage ?? "";
-          if (img === "ashleykza/kohya:latest" || img === "ashleykza/kohya-ss:latest") {
-            state.settings = { ...state.settings, dockerImage: "ashleykza/kohya:25.2.1" };
+        if (version >= 2 && version <= 5) {
+          // v4-v5: promote string[] poses/outfits to entry objects
+          if (Array.isArray(state.generation?.outfits)) {
+            state.generation.outfits = state.generation.outfits.map(
+              (o: unknown) => (typeof o === "string" ? { prompt: o } : o)
+            );
+          }
+          if (Array.isArray(state.generation?.poses)) {
+            state.generation.poses = state.generation.poses.map(
+              (p: unknown) => (typeof p === "string" ? { prompt: p } : p)
+            );
           }
         }
-        // v18→19: add prodigyDCoef and weightDecay
-        if (version === 18) {
-          state.training = { ...defaultTraining, ...state.training, prodigyDCoef: 2, weightDecay: 0.01 };
+        if (version <= 8) {
+          // v8: move dockerImage from training to settings
+          const inheritedImage = (state.training as any)?.dockerImage;
+          if (inheritedImage) {
+            state.settings = { ...(state.settings ?? {}), dockerImage: inheritedImage };
+            delete (state.training as any).dockerImage;
+          }
         }
-        // v17→18: add vPrediction flag
-        if (version === 17) {
-          state.training = { ...defaultTraining, ...state.training, vPrediction: false };
-        }
-        // v16→17: split learningRate into unetLr/textEncoderLr; add networkAlpha, noiseOffset, minSnrGamma
-        if (version === 16) {
+        if (version <= 16) {
+          // v16: split learningRate → unetLr/textEncoderLr
           const oldLr = (state.training as any)?.learningRate;
-          state.training = {
-            ...defaultTraining,
-            ...state.training,
-            unetLr: oldLr ?? defaultTraining.unetLr,
-            textEncoderLr: defaultTraining.textEncoderLr,
-            networkAlpha: defaultTraining.networkAlpha,
-            noiseOffset: defaultTraining.noiseOffset,
-            minSnrGamma: defaultTraining.minSnrGamma,
-          };
-          delete (state.training as any).learningRate;
+          if (oldLr) {
+            state.training = { ...(state.training ?? {}), unetLr: oldLr };
+            delete (state.training as any).learningRate;
+          }
         }
-        // ensure theme fields always present regardless of migration path
-        if (!state.settings?.activeTheme) {
-          state.settings = { ...defaultSettings, ...state.settings, activeTheme: "default", themeFile: "" };
+        if (version <= 20) {
+          // v15: reduce networkDim 64→32 (was briefly bumped in v12)
+          if (state.training?.networkDim === 64) {
+            state.training = { ...state.training, networkDim: 32 };
+          }
+          // v20: pin :latest docker image variants
+          const img = state.settings?.dockerImage ?? "";
+          if (img === "ashleykza/kohya:latest" || img === "ashleykza/kohya-ss:latest") {
+            state.settings = { ...(state.settings ?? {}), dockerImage: "ashleykza/kohya:25.2.1" };
+          }
         }
-        // ensure containerDiskInGb always present regardless of migration path
-        if (!state.training?.containerDiskInGb) {
-          state.training = { ...defaultTraining, ...state.training, containerDiskInGb: defaultTraining.containerDiskInGb };
-        }
-        // ensure sdxl always present regardless of migration path
-        if (state.training?.sdxl === undefined) {
-          state.training = { ...defaultTraining, ...state.training, sdxl: true };
-        }
-        // ensure optimizer always present regardless of migration path
-        if (!state.training?.optimizer) {
-          state.training = { ...defaultTraining, ...state.training, optimizer: "AdamW8bit" };
-        }
-        // ensure split LR fields always present (supersede legacy learningRate)
-        if (!state.training?.unetLr) {
-          const oldLr = (state.training as any)?.learningRate;
-          state.training = { ...defaultTraining, ...state.training, unetLr: oldLr ?? defaultTraining.unetLr, textEncoderLr: defaultTraining.textEncoderLr };
-          delete (state.training as any).learningRate;
-        }
-        if (state.training?.networkAlpha === undefined) {
-          state.training = { ...defaultTraining, ...state.training, networkAlpha: defaultTraining.networkAlpha };
-        }
-        if (state.training?.noiseOffset === undefined) {
-          state.training = { ...defaultTraining, ...state.training, noiseOffset: defaultTraining.noiseOffset };
-        }
-        if (state.training?.minSnrGamma === undefined) {
-          state.training = { ...defaultTraining, ...state.training, minSnrGamma: defaultTraining.minSnrGamma };
-        }
-        if (state.settings?.ezMode === undefined) {
-          state.settings = { ...defaultSettings, ...state.settings, ezMode: false };
-        }
-        if (state.settings?.sshKeyPath === undefined) {
-          state.settings = { ...defaultSettings, ...state.settings, sshKeyPath: "" };
-        }
-        if (state.training?.vPrediction === undefined) {
-          state.training = { ...defaultTraining, ...state.training, vPrediction: false };
-        }
-        if (state.training?.prodigyDCoef === undefined) {
-          state.training = { ...defaultTraining, ...state.training, prodigyDCoef: 2 };
-        }
-        if (state.training?.weightDecay === undefined) {
-          state.training = { ...defaultTraining, ...state.training, weightDecay: 0.01 };
-        }
+
+        // ── Deep merge with defaults ────────────────────────────────────
+        // Any new field added to defaults is automatically picked up.
+        // No more per-version "add field" migrations or "ensure X" guards.
+        state.character = { ...defaultCharacter, ...(state.character ?? {}) };
+        state.generation = { ...defaultGeneration, ...(state.generation ?? {}) };
+        state.training = { ...defaultTraining, ...(state.training ?? {}) };
+        state.settings = { ...defaultSettings, ...(state.settings ?? {}) };
+
         return state;
       },
       partialize: (state) => ({
@@ -484,6 +411,15 @@ export const useStore = create<ProjectState>()(
         settings: state.settings,
         runpodActivePodId: state.runpodActivePodId,
       }),
+      merge: (persisted, current) => {
+        const p = persisted as Partial<ProjectState>;
+        return {
+          ...current,
+          ...p,
+          // Deep-merge settings so new default fields (e.g. favourites) always appear
+          settings: { ...defaultSettings, ...(p.settings ?? {}) },
+        };
+      },
     }
   )
 );

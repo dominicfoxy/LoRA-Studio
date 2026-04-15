@@ -1,37 +1,9 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { Plus, Trash2, ChevronDown, ChevronUp, Layers } from "lucide-react";
+import { Plus, ChevronDown, ChevronUp, Layers, Star } from "lucide-react";
 import PageHeader from "../components/PageHeader";
-import { useStore, OutfitEntry, PoseEntry } from "../store";
+import { useStore, OutfitEntry, PoseEntry, AppSettings } from "../store";
 import { normSeg, buildDynamicPromptsBlock } from "../lib/forge";
-
-const POSE_PRESETS = [
-  "standing, full body", "sitting", "kneeling", "lying down", "crouching",
-  "arms crossed", "hands on hips", "one hand raised", "arms behind back",
-  "leaning against wall", "walking", "running", "looking over shoulder",
-  "from behind", "from above", "upper body", "portrait, close-up", "cowboy shot",
-];
-const EXPRESSION_PRESETS = [
-  "neutral expression", "smiling, looking at viewer", "grinning", "laughing",
-  "serious expression", "stern expression", "frowning",
-  "surprised expression", "shocked expression", "blushing",
-  "sleepy expression, tired", "confident expression",
-  "shy expression", "winking", "eyes closed",
-  "angry, glaring", "sad expression", "looking away",
-];
-const BACKGROUND_PRESETS = [
-  "simple background, white background", "simple background, grey background",
-  "simple background, gradient background", "outdoors, forest background",
-  "outdoors, city background, night", "outdoors, beach background",
-  "indoors, bedroom background", "indoors, cafe background",
-  "indoors, office background", "studio background", "bokeh background",
-];
-const OUTFIT_PRESETS = [
-  "casual outfit, jeans, t-shirt", "business casual, dress shirt, slacks",
-  "formal outfit, suit", "sundress", "hoodie, sweatpants",
-  "crop top, shorts", "swimsuit", "sportswear, athletic wear",
-  "fantasy armor", "school uniform", "lab coat", "nude",
-];
 
 const SIZE_PRESETS = [
   { label: "1:1", w: 1024, h: 1024 },
@@ -43,23 +15,147 @@ const SIZE_PRESETS = [
   { label: "3:2", w: 1216, h: 832 },
 ];
 
+// ── Favourite Chips ────────────────────────────────────────────────────────────
+function FavouriteChips({
+  category,
+  values,
+  onAdd,
+}: {
+  category: keyof AppSettings["favourites"];
+  values: string[];
+  onAdd: (v: string) => void;
+}) {
+  const { settings, updateFavourites } = useStore();
+  const favourites = settings.favourites?.[category] ?? [];
+  const [adding, setAdding] = useState(false);
+  const [newFav, setNewFav] = useState("");
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => { if (adding && inputRef.current) inputRef.current.focus(); }, [adding]);
+
+  const commitNew = () => {
+    const v = newFav.trim();
+    if (v && !favourites.includes(v)) {
+      updateFavourites(category, (prev) => [...prev, v]);
+    }
+    setNewFav("");
+    setAdding(false);
+  };
+
+  return (
+    <div style={{ marginTop: "10px" }}>
+      <div style={{ fontFamily: "var(--font-body)", fontStyle: "italic", fontSize: "11px", color: "var(--text-secondary)", marginBottom: "6px" }}>
+        Favourites — click to add, or save your own with the <Star size={9} style={{ display: "inline", verticalAlign: "middle", margin: "0 1px" }} strokeWidth={1.5} /> icon
+      </div>
+      <div style={{ display: "flex", gap: "4px", flexWrap: "wrap", alignItems: "center" }}>
+      {favourites.map((fav) => {
+        const isActive = values.includes(fav);
+        return (
+          <div
+            key={fav}
+            style={{
+              display: "inline-flex", alignItems: "center", gap: "2px",
+              padding: "3px 4px 3px 9px", fontSize: "10px", fontFamily: "var(--font-mono)",
+              background: isActive ? "var(--accent-glow)" : "var(--bg-3)",
+              border: `1px solid ${isActive ? "var(--accent-dim)" : "var(--border)"}`,
+              color: isActive ? "var(--accent-bright)" : "var(--text-secondary)",
+              borderRadius: "3px", cursor: isActive ? "default" : "pointer",
+              letterSpacing: 0, textTransform: "none", fontWeight: 400,
+              maxWidth: "260px",
+            }}
+          >
+            <span
+              onClick={() => { if (!isActive) onAdd(fav); }}
+              style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
+              title={fav}
+            >
+              {fav.length > 40 ? fav.slice(0, 40) + "…" : fav}
+            </span>
+            <button
+              onClick={(e) => { e.stopPropagation(); updateFavourites(category, (prev) => prev.filter((f) => f !== fav)); }}
+              title="Remove from favourites"
+              style={{
+                background: "none", border: "none", cursor: "pointer",
+                color: isActive ? "var(--accent-dim)" : "var(--text-muted)",
+                padding: "0 2px", fontSize: "12px", lineHeight: 1,
+                display: "flex", alignItems: "center", flexShrink: 0,
+                opacity: 0.6,
+              }}
+            >×</button>
+          </div>
+        );
+      })}
+      {adding ? (
+        <input
+          ref={inputRef}
+          value={newFav}
+          onChange={(e) => setNewFav(e.target.value)}
+          onKeyDown={(e) => { if (e.key === "Enter") commitNew(); if (e.key === "Escape") { setAdding(false); setNewFav(""); } }}
+          onBlur={commitNew}
+          placeholder="new favourite…"
+          style={{
+            width: "200px", padding: "3px 8px", fontSize: "10px",
+            fontFamily: "var(--font-mono)", borderRadius: "3px",
+          }}
+        />
+      ) : (
+        <button
+          onClick={() => setAdding(true)}
+          style={{
+            padding: "3px 8px", fontSize: "10px", fontFamily: "var(--font-mono)",
+            background: "transparent", border: "1px dashed var(--border)",
+            color: "var(--text-muted)", borderRadius: "3px", cursor: "pointer",
+            letterSpacing: 0, textTransform: "none", fontWeight: 400,
+          }}
+        >+ favourite</button>
+      )}
+      </div>
+    </div>
+  );
+}
+
+// ── Save-to-favourites button ─────────────────────────────────────────────────
+function SaveFavButton({ category, value }: { category: keyof AppSettings["favourites"]; value: string }) {
+  const { settings, updateFavourites } = useStore();
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  const isFav = (settings.favourites?.[category] ?? []).includes(trimmed);
+  return (
+    <button
+      onClick={() => {
+        if (isFav) updateFavourites(category, (prev) => prev.filter((f) => f !== trimmed));
+        else updateFavourites(category, (prev) => [...prev, trimmed]);
+      }}
+      title={isFav ? "Remove from favourites" : "Save to favourites"}
+      style={{
+        background: "none", border: "none", cursor: "pointer",
+        padding: "2px", display: "flex", alignItems: "center", flexShrink: 0,
+        color: isFav ? "var(--accent-bright)" : "var(--text-muted)",
+        opacity: isFav ? 1 : 0.5,
+        transition: "color 0.15s, opacity 0.15s",
+      }}
+    >
+      <Star size={11} fill={isFav ? "var(--accent-bright)" : "none"} strokeWidth={1.5} />
+    </button>
+  );
+}
+
 // ── Category Panel ─────────────────────────────────────────────────────────────
 function CategoryPanel({
   label,
   values,
   onChange,
-  presets,
+  favouriteCategory,
   placeholder,
   accentColor = "var(--accent)",
 }: {
   label: string;
   values: string[];
   onChange: (v: string[]) => void;
-  presets: string[];
+  favouriteCategory: keyof AppSettings["favourites"];
   placeholder: string;
   accentColor?: string;
 }) {
-  const [showPresets, setShowPresets] = useState(false);
   const [collapsed, setCollapsed] = useState(false);
 
   const update = (i: number, v: string) => {
@@ -68,8 +164,8 @@ function CategoryPanel({
     onChange(next);
   };
   const remove = (i: number) => onChange(values.filter((_, idx) => idx !== i));
-  const addPreset = (p: string) => {
-    if (!values.includes(p)) onChange([...values, p]);
+  const addValue = (v: string) => {
+    if (!values.includes(v)) onChange([...values, v]);
   };
 
   return (
@@ -80,7 +176,7 @@ function CategoryPanel({
         style={{
           display: "flex", alignItems: "center", gap: "10px",
           padding: "10px 16px", cursor: "pointer", background: "var(--bg-3)",
-          userSelect: "none", borderRadius: "7px 7px 0 0",
+          userSelect: "none", borderRadius: collapsed ? "7px" : "7px 7px 0 0",
         }}
       >
         <div style={{
@@ -110,6 +206,7 @@ function CategoryPanel({
                 placeholder={placeholder}
                 onChange={(e) => update(i, e.target.value)}
               />
+              <SaveFavButton category={favouriteCategory} value={v} />
               <button
                 onClick={() => remove(i)}
                 className="btn-ghost"
@@ -126,40 +223,9 @@ function CategoryPanel({
             >
               <Plus size={10} style={{ display: "inline", marginRight: "4px" }} />Add
             </button>
-            <button
-              className="btn-ghost"
-              onClick={() => setShowPresets(!showPresets)}
-              style={{
-                padding: "5px 12px", fontSize: "10px",
-                background: showPresets ? "var(--accent-glow)" : undefined,
-                border: showPresets ? "1px solid var(--accent-dim)" : undefined,
-                color: showPresets ? "var(--accent-bright)" : undefined,
-              }}
-            >
-              Presets {showPresets ? "▲" : "▼"}
-            </button>
           </div>
 
-          {showPresets && (
-            <div style={{ display: "flex", gap: "4px", flexWrap: "wrap", marginTop: "8px" }}>
-              {presets.map((p) => (
-                <button
-                  key={p}
-                  onClick={() => addPreset(p)}
-                  style={{
-                    padding: "3px 9px", fontSize: "10px", fontFamily: "var(--font-mono)",
-                    background: values.includes(p) ? "var(--accent-glow)" : "var(--bg-3)",
-                    border: `1px solid ${values.includes(p) ? "var(--accent-dim)" : "var(--border)"}`,
-                    color: values.includes(p) ? "var(--accent-bright)" : "var(--text-muted)",
-                    borderRadius: "3px", cursor: values.includes(p) ? "default" : "pointer",
-                    letterSpacing: 0, textTransform: "none", fontWeight: 400,
-                  }}
-                >
-                  {p.length > 36 ? p.slice(0, 36) + "…" : p}
-                </button>
-              ))}
-            </div>
-          )}
+          <FavouriteChips category={favouriteCategory} values={values} onAdd={addValue} />
         </div>
       )}
     </div>
@@ -286,15 +352,12 @@ function InlineLoraAdder({ attached, loraFiles, onAdd, onRemove, onUpdate }: {
 function OutfitCategoryPanel({
   values,
   onChange,
-  presets,
   loraFiles,
 }: {
   values: OutfitEntry[];
   onChange: (v: OutfitEntry[]) => void;
-  presets: string[];
   loraFiles: { name: string; path: string; dir: string }[];
 }) {
-  const [showPresets, setShowPresets] = useState(false);
   const [collapsed, setCollapsed] = useState(false);
 
   const update = (i: number, patch: Partial<OutfitEntry>) => {
@@ -303,20 +366,20 @@ function OutfitCategoryPanel({
     onChange(next);
   };
   const remove = (i: number) => onChange(values.filter((_, idx) => idx !== i));
-  const addPreset = (p: string) => {
-    if (!values.some((v) => v.prompt === p)) onChange([...values, { prompt: p }]);
+  const addFromFav = (prompt: string) => {
+    if (!values.some((v) => v.prompt === prompt)) onChange([...values, { prompt }]);
   };
 
   return (
     <div style={{ border: "1px solid var(--border)", borderRadius: "8px", marginBottom: "12px" }}>
       <div
         onClick={() => setCollapsed(!collapsed)}
-        style={{ display: "flex", alignItems: "center", gap: "10px", padding: "10px 16px", cursor: "pointer", background: "var(--bg-3)", userSelect: "none", borderRadius: "7px 7px 0 0" }}
+        style={{ display: "flex", alignItems: "center", gap: "10px", padding: "10px 16px", cursor: "pointer", background: "var(--bg-3)", userSelect: "none", borderRadius: collapsed ? "7px" : "7px 7px 0 0" }}
       >
-        <div style={{ fontFamily: "var(--font-mono)", fontSize: "12px", color: "#a0c878", textTransform: "uppercase", letterSpacing: "0.08em", fontWeight: 700 }}>
+        <div style={{ fontFamily: "var(--font-mono)", fontSize: "10px", color: "#a0c878", textTransform: "uppercase", letterSpacing: "0.12em", fontWeight: 700 }}>
           Outfits / Clothing
         </div>
-        <div style={{ fontFamily: "var(--font-mono)", fontSize: "12px", color: "var(--text-secondary)" }}>
+        <div style={{ fontFamily: "var(--font-mono)", fontSize: "10px", color: "var(--text-secondary)" }}>
           {values.length} variant{values.length !== 1 ? "s" : ""}
         </div>
         <div style={{ flex: 1 }} />
@@ -335,6 +398,7 @@ function OutfitCategoryPanel({
                   placeholder="e.g. casual outfit, jeans, a plain white t-shirt"
                   onChange={(e) => update(i, { prompt: e.target.value })}
                 />
+                <SaveFavButton category="outfits" value={v.prompt} />
                 <button
                   onClick={() => remove(i)}
                   className="btn-ghost"
@@ -368,40 +432,9 @@ function OutfitCategoryPanel({
             <button className="btn-ghost" onClick={() => onChange([...values, { prompt: "" }])} style={{ padding: "5px 12px", fontSize: "10px" }}>
               <Plus size={10} style={{ display: "inline", marginRight: "4px" }} />Add
             </button>
-            <button
-              className="btn-ghost"
-              onClick={() => setShowPresets(!showPresets)}
-              style={{
-                padding: "5px 12px", fontSize: "10px",
-                background: showPresets ? "var(--accent-glow)" : undefined,
-                border: showPresets ? "1px solid var(--accent-dim)" : undefined,
-                color: showPresets ? "var(--accent-bright)" : undefined,
-              }}
-            >
-              Presets {showPresets ? "▲" : "▼"}
-            </button>
           </div>
 
-          {showPresets && (
-            <div style={{ display: "flex", gap: "4px", flexWrap: "wrap", marginTop: "8px" }}>
-              {presets.map((p) => (
-                <button
-                  key={p}
-                  onClick={() => addPreset(p)}
-                  style={{
-                    padding: "3px 9px", fontSize: "10px", fontFamily: "var(--font-mono)",
-                    background: values.some((v) => v.prompt === p) ? "var(--accent-glow)" : "var(--bg-3)",
-                    border: `1px solid ${values.some((v) => v.prompt === p) ? "var(--accent-dim)" : "var(--border)"}`,
-                    color: values.some((v) => v.prompt === p) ? "var(--accent-bright)" : "var(--text-muted)",
-                    borderRadius: "3px", cursor: values.some((v) => v.prompt === p) ? "default" : "pointer",
-                    letterSpacing: 0, textTransform: "none", fontWeight: 400,
-                  }}
-                >
-                  {p.length > 36 ? p.slice(0, 36) + "…" : p}
-                </button>
-              ))}
-            </div>
-          )}
+          <FavouriteChips category="outfits" values={values.map((v) => v.prompt)} onAdd={addFromFav} />
         </div>
       )}
     </div>
@@ -596,7 +629,7 @@ function SettingsPanel() {
     <div style={{ border: "1px solid var(--border)", borderRadius: "8px", marginBottom: "12px" }}>
       <div
         onClick={() => setCollapsed(!collapsed)}
-        style={{ display: "flex", alignItems: "center", gap: "10px", padding: "10px 16px", cursor: "pointer", background: "var(--bg-3)", userSelect: "none", borderRadius: "7px 7px 0 0" }}
+        style={{ display: "flex", alignItems: "center", gap: "10px", padding: "10px 16px", cursor: "pointer", background: "var(--bg-3)", userSelect: "none", borderRadius: collapsed ? "7px" : "7px 7px 0 0" }}
       >
         <div style={{ fontFamily: "var(--font-mono)", fontSize: "10px", color: "var(--text-secondary)", textTransform: "uppercase", letterSpacing: "0.12em", fontWeight: 700 }}>Settings</div>
         {ezMode && <div style={{ fontFamily: "var(--font-mono)", fontSize: "9px", color: "var(--accent-bright)", background: "var(--accent-glow)", border: "1px solid var(--accent-dim)", borderRadius: "3px", padding: "1px 6px", letterSpacing: "0.1em" }}>EZ</div>}
@@ -720,30 +753,27 @@ function SettingsPanel() {
 function PoseCategoryPanel({
   values,
   onChange,
-  presets,
   loraFiles,
 }: {
   values: PoseEntry[];
   onChange: (v: PoseEntry[]) => void;
-  presets: string[];
   loraFiles: { name: string; path: string; dir: string }[];
 }) {
-  const [showPresets, setShowPresets] = useState(false);
   const [collapsed, setCollapsed] = useState(false);
 
   const update = (i: number, patch: Partial<PoseEntry>) => {
     const next = [...values]; next[i] = { ...next[i], ...patch }; onChange(next);
   };
   const remove = (i: number) => onChange(values.filter((_, idx) => idx !== i));
-  const addPreset = (p: string) => {
-    if (!values.some((v) => v.prompt === p)) onChange([...values, { prompt: p }]);
+  const addFromFav = (prompt: string) => {
+    if (!values.some((v) => v.prompt === prompt)) onChange([...values, { prompt }]);
   };
 
   return (
     <div style={{ border: "1px solid var(--border)", borderRadius: "8px", marginBottom: "12px" }}>
-      <div onClick={() => setCollapsed(!collapsed)} style={{ display: "flex", alignItems: "center", gap: "10px", padding: "10px 16px", cursor: "pointer", background: "var(--bg-3)", userSelect: "none", borderRadius: "7px 7px 0 0" }}>
-        <div style={{ fontFamily: "var(--font-mono)", fontSize: "12px", color: "var(--accent-bright)", textTransform: "uppercase", letterSpacing: "0.08em", fontWeight: 700 }}>Poses / Framing</div>
-        <div style={{ fontFamily: "var(--font-mono)", fontSize: "12px", color: "var(--text-secondary)" }}>{values.length} variant{values.length !== 1 ? "s" : ""}</div>
+      <div onClick={() => setCollapsed(!collapsed)} style={{ display: "flex", alignItems: "center", gap: "10px", padding: "10px 16px", cursor: "pointer", background: "var(--bg-3)", userSelect: "none", borderRadius: collapsed ? "7px" : "7px 7px 0 0" }}>
+        <div style={{ fontFamily: "var(--font-mono)", fontSize: "10px", color: "var(--accent-bright)", textTransform: "uppercase", letterSpacing: "0.12em", fontWeight: 700 }}>Poses / Framing</div>
+        <div style={{ fontFamily: "var(--font-mono)", fontSize: "10px", color: "var(--text-secondary)" }}>{values.length} variant{values.length !== 1 ? "s" : ""}</div>
         <div style={{ flex: 1 }} />
         {collapsed ? <ChevronDown size={13} color="var(--text-muted)" /> : <ChevronUp size={13} color="var(--text-muted)" />}
       </div>
@@ -754,6 +784,7 @@ function PoseCategoryPanel({
               <div style={{ display: "flex", gap: "8px", alignItems: "center" }}>
                 <div style={{ fontFamily: "var(--font-mono)", fontSize: "10px", color: "var(--text-muted)", width: "18px", textAlign: "right", flexShrink: 0 }}>{i + 1}</div>
                 <input style={{ flex: 1 }} value={v.prompt} placeholder="e.g. standing, full body, arms crossed" onChange={(e) => update(i, { prompt: e.target.value })} />
+                <SaveFavButton category="poses" value={v.prompt} />
                 <button onClick={() => remove(i)} className="btn-ghost" style={{ padding: "4px 8px", fontSize: "14px", flexShrink: 0, color: "var(--text-muted)", lineHeight: 1 }}>×</button>
               </div>
               {loraFiles.length > 0 && (
@@ -771,19 +802,8 @@ function PoseCategoryPanel({
             <button className="btn-ghost" onClick={() => onChange([...values, { prompt: "" }])} style={{ padding: "5px 12px", fontSize: "10px" }}>
               <Plus size={10} style={{ display: "inline", marginRight: "4px" }} />Add
             </button>
-            <button className="btn-ghost" onClick={() => setShowPresets(!showPresets)} style={{ padding: "5px 12px", fontSize: "10px", background: showPresets ? "var(--accent-glow)" : undefined, border: showPresets ? "1px solid var(--accent-dim)" : undefined, color: showPresets ? "var(--accent-bright)" : undefined }}>
-              Presets {showPresets ? "▲" : "▼"}
-            </button>
           </div>
-          {showPresets && (
-            <div style={{ display: "flex", gap: "4px", flexWrap: "wrap", marginTop: "8px" }}>
-              {presets.map((p) => (
-                <button key={p} onClick={() => addPreset(p)} style={{ padding: "3px 9px", fontSize: "10px", fontFamily: "var(--font-mono)", background: values.some((v) => v.prompt === p) ? "var(--accent-glow)" : "var(--bg-3)", border: `1px solid ${values.some((v) => v.prompt === p) ? "var(--accent-dim)" : "var(--border)"}`, color: values.some((v) => v.prompt === p) ? "var(--accent-bright)" : "var(--text-muted)", borderRadius: "3px", cursor: values.some((v) => v.prompt === p) ? "default" : "pointer", letterSpacing: 0, textTransform: "none", fontWeight: 400 }}>
-                  {p.length > 36 ? p.slice(0, 36) + "…" : p}
-                </button>
-              ))}
-            </div>
-          )}
+          <FavouriteChips category="poses" values={values.map((v) => v.prompt)} onAdd={addFromFav} />
         </div>
       )}
     </div>
@@ -978,28 +998,26 @@ export default function ShotList() {
         <PoseCategoryPanel
           values={generation.poses}
           onChange={(v) => updateGeneration({ poses: v })}
-          presets={POSE_PRESETS}
           loraFiles={loraFiles}
         />
         <CategoryPanel
           label="Expressions"
           values={generation.expressions}
           onChange={(v) => updateGeneration({ expressions: v })}
-          presets={EXPRESSION_PRESETS}
+          favouriteCategory="expressions"
           placeholder="e.g. smiling and tired, looking away"
           accentColor="#7eb8d4"
         />
         <OutfitCategoryPanel
           values={generation.outfits}
           onChange={(v) => updateGeneration({ outfits: v })}
-          presets={OUTFIT_PRESETS}
           loraFiles={loraFiles}
         />
         <CategoryPanel
           label="Backgrounds"
           values={generation.backgrounds}
           onChange={(v) => updateGeneration({ backgrounds: v })}
-          presets={BACKGROUND_PRESETS}
+          favouriteCategory="backgrounds"
           placeholder="e.g. outdoors, city street, evening lighting"
           accentColor="#c8a078"
         />

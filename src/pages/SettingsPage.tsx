@@ -2,7 +2,7 @@ import { useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { CheckCircle, XCircle, FolderOpen } from "lucide-react";
 import PageHeader from "../components/PageHeader";
-import { useStore } from "../store";
+import { useStore, defaultSettings } from "../store";
 import { BUILT_IN_THEMES } from "../lib/themes";
 
 type TestState = "idle" | "testing" | "ok" | "fail";
@@ -118,7 +118,7 @@ export default function SettingsPage() {
                   )}
                 </div>
                 <div style={{ fontFamily: "var(--font-body)", fontStyle: "italic", fontSize: "11px", color: "var(--text-secondary)", marginTop: "4px" }}>
-                  JSON object of CSS variable overrides, e.g. {"{"}"--accent": "#ff6600"{"}"}. Layered on top of the selected theme.
+                  JSON object of CSS variable overrides, e.g. {"{"}"--accent": "#ff6600"{"}"}. Layered on top of the selected theme. Theme files are portable — the same JSON works in any app that uses this design system.
                 </div>
               </div>
             </div>
@@ -139,6 +139,21 @@ export default function SettingsPage() {
               </span>
               <button className="btn-ghost" onClick={() => { setLocalScale(1.0); setSettings({ uiScale: 1.0 }); }} style={{ padding: "4px 10px", fontSize: "11px", flexShrink: 0 }}>
                 Reset
+              </button>
+            </div>
+
+            {/* Shot List favourites */}
+            <div style={{ marginTop: "20px" }}>
+              <div className="section-label">Shot List Favourites</div>
+              <div style={{ fontFamily: "var(--font-body)", fontStyle: "italic", fontSize: "11px", color: "var(--text-secondary)", marginBottom: "8px" }}>
+                Reset all favourite presets (poses, outfits, expressions, backgrounds) to the built-in defaults.
+              </div>
+              <button
+                className="btn-ghost"
+                onClick={() => setSettings({ favourites: defaultSettings.favourites })}
+                style={{ padding: "5px 14px", fontSize: "11px" }}
+              >
+                Restore default favourites
               </button>
             </div>
           </section>

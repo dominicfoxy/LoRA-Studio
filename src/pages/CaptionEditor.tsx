@@ -1,6 +1,6 @@
 import { useState, useCallback, useEffect, useMemo } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { Save, RefreshCw, Filter, ChevronDown, ChevronUp } from "lucide-react";
+import { Save, RefreshCw, Filter, ChevronDown, ChevronUp, FolderOpen } from "lucide-react";
 import PageHeader from "../components/PageHeader";
 import { useStore, GeneratedImage } from "../store";
 
